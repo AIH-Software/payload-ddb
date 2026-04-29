@@ -13,16 +13,16 @@ stores data in [Amazon DynamoDB](https://aws.amazon.com/dynamodb/).
 ## Installation
 
 ```bash
-pnpm add @dilton/payload-ddb
+pnpm add @aih-pkg/payload-ddb
 # or
-npm install @dilton/payload-ddb
+npm install @aih-pkg/payload-ddb
 ```
 
 ## Quick start (DynamoDB Local)
 
 ```ts
 import { buildConfig } from 'payload'
-import { dynamoAdapter } from '@dilton/payload-ddb'
+import { dynamoAdapter } from '@aih-pkg/payload-ddb'
 
 export default buildConfig({
   db: dynamoAdapter({

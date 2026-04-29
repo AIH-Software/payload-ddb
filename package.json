@@ -1,5 +1,5 @@
 {
-  "name": "@dilton/payload-ddb",
+  "name": "@aih-pkg/payload-ddb",
   "version": "1.1.0",
   "description": "An unofficial database provider for PayloadCMS, utilizing DynamoDb",
   "keywords": [
@@ -10,13 +10,14 @@
     "database",
     "provider"
   ],
-  "homepage": "https://github.com/dbyron10/payload-ddb#readme",
+  "private": true,
+  "homepage": "https://github.com/AIH-Software/payload-ddb#readme",
   "bugs": {
-    "url": "https://github.com/dbyron10/payload-ddb/issues"
+    "url": "https://github.com/AIH-Software/payload-ddb/issues"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/dbyron10/payload-ddb.git"
+    "url": "git+https://github.com/AIH-Software/payload-ddb.git"
   },
   "license": "MIT",
   "author": "Dillon Byron",
