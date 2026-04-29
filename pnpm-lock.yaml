@@ -14,9 +14,6 @@ importers:
       '@aws-sdk/lib-dynamodb':
         specifier: ^3.1038.0
         version: 3.1038.0(@aws-sdk/client-dynamodb@3.1038.0)
-      uuid:
-        specifier: ^14.0.0
-        version: 14.0.0
     devDependencies:
       '@swc/cli':
         specifier: ^0.8.1
@@ -1525,10 +1522,6 @@ packages:
 
   uuid@11.1.0:
     resolution: {integrity: sha512-0/A9rDy9P7cJ+8w1c9WD9V//9Wj15Ce2MPz8Ri6032usz+NfePxx5AcN3bN+r6ZL6jEo066/yNYB3tn4pQEx+A==}
-    hasBin: true
-
-  uuid@14.0.0:
-    resolution: {integrity: sha512-Qo+uWgilfSmAhXCMav1uYFynlQO7fMFiMVZsQqZRMIXp0O7rR7qjkj+cPvBHLgBqi960QCoo/PH2/6ZtVqKvrg==}
     hasBin: true
 
   web-worker@1.5.0:
@@ -3294,8 +3287,6 @@ snapshots:
   utf8-byte-length@1.0.5: {}
 
   uuid@11.1.0: {}
-
-  uuid@14.0.0: {}
 
   web-worker@1.5.0: {}
 

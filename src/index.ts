@@ -34,7 +34,7 @@ import { upsert } from './upsert.js'
 export type { Args, DynamoAdapter } from './types.js'
 
 const NAME = 'dynamodb'
-const PACKAGE_NAME = '@aih-pkg/payload-ddb'
+const PACKAGE_NAME = '@aih-software/payload-ddb'
 const DEFAULT_TABLE_NAME = 'payload'
 
 export function dynamoAdapter(args: Args = {}): DatabaseAdapterObj<DynamoAdapter> {

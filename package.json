@@ -1,5 +1,5 @@
 {
-  "name": "@aih-pkg/payload-ddb",
+  "name": "@aih-software/payload-ddb",
   "version": "2.0.0",
   "description": "An unofficial database provider for PayloadCMS, utilizing DynamoDb",
   "keywords": [
@@ -10,7 +10,11 @@
     "database",
     "provider"
   ],
-  "private": true,
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com",
+    "access": "restricted"
+  },
+  "packageManager": "pnpm@10.33.2",
   "homepage": "https://github.com/AIH-Software/payload-ddb#readme",
   "bugs": {
     "url": "https://github.com/AIH-Software/payload-ddb/issues"
@@ -43,8 +47,7 @@
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.1038.0",
-    "@aws-sdk/lib-dynamodb": "^3.1038.0",
-    "uuid": "^14.0.0"
+    "@aws-sdk/lib-dynamodb": "^3.1038.0"
   },
   "devDependencies": {
     "@swc/cli": "^0.8.1",
@@ -52,5 +55,10 @@
     "@types/node": "^25.6.0",
     "payload": "^3.84.1",
     "typescript": "^6.0.3"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "@swc/core"
+    ]
   }
 }
