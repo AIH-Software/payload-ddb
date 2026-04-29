@@ -4,17 +4,27 @@ import type { DynamoAdapter } from './types.js'
 
 import { applySorts } from './utilities/applySorts.js'
 import { matchesWhere } from './utilities/matchesWhere.js'
-import { scanMatching } from './utilities/scanMatching.js'
+import { queryMatching } from './utilities/queryMatching.js'
 
 /**
  * Return the latest version of every doc as a paginated, doc-shaped result.
  *
  * Strategy:
- *  1. Scan the versions table for `latest=true` rows (one per parent).
+ *  1. Query the versions partition for `latest=true` rows (one per parent).
  *  2. Project each row's `version` payload up to top-level so the result
  *     looks like a doc — this lets the user's `where` / `sort` operate in
  *     doc-field terms instead of `version.x` paths.
- *  3. Apply `where` post-projection, sort, paginate.
+ *  3. Fill in any docs that have a row in the *main* partition but no
+ *     `latest=true` version row. This covers three cases:
+ *     - documents created before versioning was enabled
+ *     - data orphaned by historical adapter bugs that dropped version writes
+ *     - Payload's prune-on-create flow that issues
+ *       `deleteVersions where updatedAt <= newVersion.updatedAt` and
+ *       (because we serialize timestamps at ms precision and Payload reuses
+ *       the same `Date` for both the version's `updatedAt` and the prune
+ *       cutoff) ends up matching the just-created row, leaving the main
+ *       collection populated but the versions partition empty.
+ *  4. Apply `where` post-projection, sort, paginate.
  *
  * No `_status` filter is applied — `queryDrafts` returns the latest version
  * regardless of draft/published state. Payload's higher-level code decides
@@ -24,19 +34,33 @@ export const queryDrafts: QueryDrafts = async function queryDrafts(
   this: DynamoAdapter,
   { collection, limit = 10, page = 1, pagination = true, sort, where },
 ) {
-  const tableName = this.resolveVersionsTableName(collection)
-  const latestRows = await scanMatching(this, tableName, { latest: { equals: true } })
+  const versionsPartition = this.resolveVersionsPartition(collection)
+  const docsPartition = this.resolvePartition(collection)
 
-  const projected: Record<string, unknown>[] = []
+  const [latestRows, mainRows] = await Promise.all([
+    queryMatching(this, versionsPartition, { latest: { equals: true } }),
+    queryMatching(this, docsPartition, undefined),
+  ])
+
+  // Latest-version rows win. We key by parent id so `mainRows` only fills
+  // entries that have no version backing.
+  const docsByParent = new Map<unknown, Record<string, unknown>>()
   for (const row of latestRows) {
     const version = row['version']
     if (!version || typeof version !== 'object') continue
-    projected.push({
+    docsByParent.set(row['parent'], {
       ...(version as Record<string, unknown>),
       id: row['parent'],
     })
   }
 
+  for (const doc of mainRows) {
+    if (!docsByParent.has(doc['id'])) {
+      docsByParent.set(doc['id'], doc)
+    }
+  }
+
+  const projected = [...docsByParent.values()]
   const matched = where ? projected.filter((doc) => matchesWhere(doc, where)) : projected
 
   applySorts(matched, sort)

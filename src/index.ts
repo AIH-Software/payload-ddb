@@ -35,24 +35,14 @@ export type { Args, DynamoAdapter } from './types.js'
 
 const NAME = 'dynamodb'
 const PACKAGE_NAME = '@aih-pkg/payload-ddb'
+const DEFAULT_TABLE_NAME = 'payload'
 
 export function dynamoAdapter(args: Args = {}): DatabaseAdapterObj<DynamoAdapter> {
   function adapterInit({ payload }: { payload: Payload }): DynamoAdapter {
-    const tableNames: Record<string, string> = { ...(args.tableNames ?? {}) }
-    const tablePrefix = args.tablePrefix ?? ''
+    const tableName = args.tableName ?? DEFAULT_TABLE_NAME
 
-    const resolveTableName = (slug: string): string => {
-      const explicit = tableNames[slug]
-      if (explicit) {
-        return explicit
-      }
-      const resolved = `${tablePrefix}${slug}`
-      tableNames[slug] = resolved
-      return resolved
-    }
-
-    const resolveVersionsTableName = (slug: string): string =>
-      `${resolveTableName(slug)}_versions`
+    const resolvePartition = (slug: string): string => slug
+    const resolveVersionsPartition = (slug: string): string => `${slug}_versions`
 
     return createDatabaseAdapter<DynamoAdapter>({
       name: NAME,
@@ -71,11 +61,10 @@ export function dynamoAdapter(args: Args = {}): DatabaseAdapterObj<DynamoAdapter
       client: args.client,
       docClient: undefined,
       ownsClient: !args.client,
-      tablePrefix,
-      tableNames,
+      tableName,
       ensureTables: args.ensureTables ?? false,
-      resolveTableName,
-      resolveVersionsTableName,
+      resolvePartition,
+      resolveVersionsPartition,
 
       // ----- lifecycle -----
       connect,

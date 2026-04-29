@@ -7,17 +7,17 @@ import {
 import type { DynamoAdapter } from '../types.js'
 
 /**
- * Idempotently provision a DynamoDB table with our standard schema:
- * `id` String partition key, on-demand (`PAY_PER_REQUEST`) billing.
+ * Idempotently provision the single backing table with our composite-key
+ * schema: `pk` (String) partition + `sk` (String) sort, on-demand
+ * (`PAY_PER_REQUEST`) billing.
  *
  * Behavior:
  *  - DescribeTable first; return early if the table already exists.
  *  - Otherwise CreateTable + wait until ACTIVE (up to 60s).
  *
- * Limitations:
- *  - Always uses String for the `id` attribute. Collections that opt into
- *    Number IDs will need pre-provisioned tables until v2 of this helper.
- *  - No GSIs are created. Wire those up here when we add Query routing.
+ * Sort key is always String. Collections that opt into Number IDs still work
+ * — the adapter coerces ids into strings for `sk` while keeping the original
+ * type on the `id` attribute.
  */
 export async function ensureTable(adapter: DynamoAdapter, tableName: string): Promise<void> {
   const client = adapter.client
@@ -39,8 +39,14 @@ export async function ensureTable(adapter: DynamoAdapter, tableName: string): Pr
   await client.send(
     new CreateTableCommand({
       TableName: tableName,
-      AttributeDefinitions: [{ AttributeName: 'id', AttributeType: 'S' }],
-      KeySchema: [{ AttributeName: 'id', KeyType: 'HASH' }],
+      AttributeDefinitions: [
+        { AttributeName: 'pk', AttributeType: 'S' },
+        { AttributeName: 'sk', AttributeType: 'S' },
+      ],
+      KeySchema: [
+        { AttributeName: 'pk', KeyType: 'HASH' },
+        { AttributeName: 'sk', KeyType: 'RANGE' },
+      ],
       BillingMode: 'PAY_PER_REQUEST',
     }),
   )

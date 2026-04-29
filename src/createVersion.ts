@@ -6,13 +6,15 @@ import { randomUUID } from 'node:crypto'
 import type { DynamoAdapter } from './types.js'
 
 import { flipPreviousLatest } from './utilities/flipPreviousLatest.js'
+import { normalizeForDynamo } from './utilities/normalizeForDynamo.js'
 
 /**
  * Insert a new version for a collection's parent doc, maintaining the
  * `latest=true` invariant per parent.
  *
- * Three round-trips: scan to find the previous latest, put to flip it, put
- * the new row. See `flipPreviousLatest` for the atomicity caveat.
+ * Three round-trips: query the partition for the previous latest, put to
+ * flip it, put the new row. See `flipPreviousLatest` for the atomicity
+ * caveat.
  *
  * `autosave` is persisted on the row even though it isn't surfaced in
  * `TypeWithVersion` — `findVersions` filters by it.
@@ -36,14 +38,15 @@ export const createVersion: CreateVersion = async function createVersion(
     throw new Error('payload-ddb: docClient is not initialized — call connect() first.')
   }
 
-  const tableName = this.resolveVersionsTableName(collectionSlug)
+  const partition = this.resolveVersionsPartition(collectionSlug)
 
-  await flipPreviousLatest(this, tableName, {
+  await flipPreviousLatest(this, partition, {
     and: [{ parent: { equals: parent } }, { latest: { equals: true } }],
   })
 
+  const id = randomUUID()
   const item: Record<string, unknown> = {
-    id: randomUUID(),
+    id,
     parent,
     version: versionData,
     createdAt,
@@ -56,8 +59,12 @@ export const createVersion: CreateVersion = async function createVersion(
 
   await docClient.send(
     new PutCommand({
-      TableName: tableName,
-      Item: item,
+      TableName: this.tableName,
+      Item: normalizeForDynamo({
+        ...item,
+        pk: partition,
+        sk: id,
+      }),
     }),
   )
 

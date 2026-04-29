@@ -4,10 +4,12 @@ import { PutCommand } from '@aws-sdk/lib-dynamodb'
 
 import type { DynamoAdapter } from './types.js'
 
+import { normalizeForDynamo } from './utilities/normalizeForDynamo.js'
+
 /**
  * Insert a global's singleton row. The slug is forced as the row's `id` —
  * this is what makes `findGlobal`/`updateGlobal` deterministic single-key
- * reads.
+ * reads (`pk = slug`, `sk = slug`).
  */
 export const createGlobal: CreateGlobal = async function createGlobal(
   this: DynamoAdapter,
@@ -22,8 +24,12 @@ export const createGlobal: CreateGlobal = async function createGlobal(
 
   await docClient.send(
     new PutCommand({
-      TableName: this.resolveTableName(slug),
-      Item: item,
+      TableName: this.tableName,
+      Item: normalizeForDynamo({
+        ...item,
+        pk: this.resolvePartition(slug),
+        sk: slug,
+      }),
     }),
   )
 

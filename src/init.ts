@@ -10,8 +10,9 @@ import { ensureTable } from './utilities/ensureTable.js'
  * Payload's order is `init → connect`, so we call `ensureConnected` here
  * to populate the client before any DynamoDB operations.
  *
- * Resolves table names for every configured collection and global, and (when
- * `ensureTables` is true) provisions any that don't yet exist.
+ * In single-table mode, every collection, global, and versions stream lives
+ * under a different `pk` value in the same physical table — so provisioning
+ * just means making sure that one table exists.
  *
  * Provisioning is opt-in because real deployments typically manage tables
  * out-of-band (CDK, Terraform, CloudFormation). It's a meaningful dev-loop
@@ -20,34 +21,12 @@ import { ensureTable } from './utilities/ensureTable.js'
 export const init: Init = async function (this: DynamoAdapter) {
   ensureConnected(this)
 
-  const tableNames: string[] = []
-
-  for (const collection of this.payload.config.collections) {
-    if (!this.tableNames[collection.slug]) {
-      this.tableNames[collection.slug] = `${this.tablePrefix}${collection.slug}`
-    }
-    tableNames.push(this.resolveTableName(collection.slug))
-    if (collection.versions) {
-      tableNames.push(this.resolveVersionsTableName(collection.slug))
-    }
-  }
-
-  for (const global of this.payload.config.globals) {
-    if (!this.tableNames[global.slug]) {
-      this.tableNames[global.slug] = `${this.tablePrefix}${global.slug}`
-    }
-    tableNames.push(this.resolveTableName(global.slug))
-    if (global.versions) {
-      tableNames.push(this.resolveVersionsTableName(global.slug))
-    }
-  }
-
   this.payload.logger.debug(
-    `payload-ddb: init resolved ${tableNames.length} table(s); ensureTables=${this.ensureTables}`,
+    `payload-ddb: init using table \`${this.tableName}\`; ensureTables=${this.ensureTables}`,
   )
 
   if (this.ensureTables) {
-    await Promise.all(tableNames.map((name) => ensureTable(this, name)))
-    this.payload.logger.debug('payload-ddb: tables ready')
+    await ensureTable(this, this.tableName)
+    this.payload.logger.debug('payload-ddb: table ready')
   }
 }

@@ -5,22 +5,24 @@ import { PutCommand } from '@aws-sdk/lib-dynamodb'
 import type { DynamoAdapter } from '../types.js'
 
 import { findFirst } from './findFirst.js'
+import { normalizeForDynamo } from './normalizeForDynamo.js'
 
 /**
- * Locate the row matching `match` (typically the current `latest=true` row
- * for some scope) and put it back with `latest: false`. Used by
- * `createVersion` and `createGlobalVersion` to maintain the invariant that
- * exactly one version per parent (or per global table) carries `latest=true`.
+ * Locate the row matching `match` in the given partition (typically the
+ * current `latest=true` row for some scope) and put it back with
+ * `latest: false`. Used by `createVersion` and `createGlobalVersion` to
+ * maintain the invariant that exactly one version per scope carries
+ * `latest=true`.
  *
  * Not atomic with the subsequent insert. A `TransactWriteItems` rewrite is
  * the natural follow-up once the transaction methods are wired.
  */
 export async function flipPreviousLatest(
   adapter: DynamoAdapter,
-  tableName: string,
+  partition: string,
   match: Where,
 ): Promise<void> {
-  const previous = await findFirst(adapter, { tableName, where: match })
+  const previous = await findFirst(adapter, { partition, where: match })
   if (!previous) return
 
   const docClient = adapter.docClient
@@ -30,8 +32,13 @@ export async function flipPreviousLatest(
 
   await docClient.send(
     new PutCommand({
-      TableName: tableName,
-      Item: { ...previous, latest: false },
+      TableName: adapter.tableName,
+      Item: normalizeForDynamo({
+        ...previous,
+        pk: partition,
+        sk: String(previous['id']),
+        latest: false,
+      }),
     }),
   )
 }

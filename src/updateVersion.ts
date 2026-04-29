@@ -5,12 +5,14 @@ import { GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb'
 import type { DynamoAdapter } from './types.js'
 
 import { findFirst } from './utilities/findFirst.js'
+import { normalizeForDynamo } from './utilities/normalizeForDynamo.js'
+import { stripInternalKeys } from './utilities/stripInternalKeys.js'
 
 /**
- * Read-merge-write against the versions table. `versionData` is splatted onto
- * the existing row, which means Payload-passed metadata (`createdAt`,
- * `updatedAt`, `latest`, `parent`, `publishedLocale`) and the inner `version`
- * payload all overlay correctly.
+ * Read-merge-write against the versions partition. `versionData` is
+ * splatted onto the existing row, which means Payload-passed metadata
+ * (`createdAt`, `updatedAt`, `latest`, `parent`, `publishedLocale`) and the
+ * inner `version` payload all overlay correctly.
  *
  * The adapter does not cascade `latest=true` flips — Payload is responsible
  * for clearing the previous latest by issuing a separate `updateVersion`
@@ -27,20 +29,21 @@ export const updateVersion: UpdateVersion = async function updateVersion(
     throw new Error('payload-ddb: docClient is not initialized — call connect() first.')
   }
 
-  const tableName = this.resolveVersionsTableName(args.collection)
+  const partition = this.resolveVersionsPartition(args.collection)
 
   let target: null | Record<string, unknown> = null
 
   if (args.id !== undefined && args.id !== null) {
     const result = await docClient.send(
       new GetCommand({
-        TableName: tableName,
-        Key: { id: args.id },
+        TableName: this.tableName,
+        Key: { pk: partition, sk: String(args.id) },
+        ConsistentRead: true,
       }),
     )
-    target = result.Item ?? null
+    target = result.Item ? stripInternalKeys(result.Item) : null
   } else if (args.where) {
-    target = await findFirst(this, { tableName, where: args.where })
+    target = await findFirst(this, { partition, where: args.where })
   }
 
   if (!target) {
@@ -55,8 +58,12 @@ export const updateVersion: UpdateVersion = async function updateVersion(
 
   await docClient.send(
     new PutCommand({
-      TableName: tableName,
-      Item: merged,
+      TableName: this.tableName,
+      Item: normalizeForDynamo({
+        ...merged,
+        pk: partition,
+        sk: String(merged['id']),
+      }),
     }),
   )
 

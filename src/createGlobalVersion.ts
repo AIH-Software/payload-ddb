@@ -6,11 +6,11 @@ import { randomUUID } from 'node:crypto'
 import type { DynamoAdapter } from './types.js'
 
 import { flipPreviousLatest } from './utilities/flipPreviousLatest.js'
+import { normalizeForDynamo } from './utilities/normalizeForDynamo.js'
 
 /**
  * Like `createVersion` but for global singletons: there's no `parent`, and
- * the "latest" scope is the entire versions table (each global gets its
- * own).
+ * the "latest" scope is the entire global's versions partition.
  */
 export const createGlobalVersion: CreateGlobalVersion = async function createGlobalVersion(
   this: DynamoAdapter,
@@ -30,12 +30,13 @@ export const createGlobalVersion: CreateGlobalVersion = async function createGlo
     throw new Error('payload-ddb: docClient is not initialized — call connect() first.')
   }
 
-  const tableName = this.resolveVersionsTableName(globalSlug)
+  const partition = this.resolveVersionsPartition(globalSlug)
 
-  await flipPreviousLatest(this, tableName, { latest: { equals: true } })
+  await flipPreviousLatest(this, partition, { latest: { equals: true } })
 
+  const id = randomUUID()
   const item: Record<string, unknown> = {
-    id: randomUUID(),
+    id,
     version: versionData,
     createdAt,
     updatedAt,
@@ -47,8 +48,12 @@ export const createGlobalVersion: CreateGlobalVersion = async function createGlo
 
   await docClient.send(
     new PutCommand({
-      TableName: tableName,
-      Item: item,
+      TableName: this.tableName,
+      Item: normalizeForDynamo({
+        ...item,
+        pk: partition,
+        sk: id,
+      }),
     }),
   )
 

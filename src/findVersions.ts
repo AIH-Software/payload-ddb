@@ -3,20 +3,21 @@ import type { FindVersions, PaginatedDocs } from 'payload'
 import type { DynamoAdapter } from './types.js'
 
 import { applySorts } from './utilities/applySorts.js'
-import { scanMatching } from './utilities/scanMatching.js'
+import { queryMatching } from './utilities/queryMatching.js'
 
 /**
- * Same shape as `find` but routed at the versions table. Could share more
- * code with `find` via a `paginatedScan(adapter, tableName, args)` helper,
- * but keeping them separate makes per-method tweaks (e.g. version-only
- * filters, eventual draft-aware logic) easier to land without refactoring.
+ * Same shape as `find` but routed at the versions partition. Could share
+ * more code with `find` via a `paginatedQuery(adapter, partition, args)`
+ * helper, but keeping them separate makes per-method tweaks (e.g.
+ * version-only filters, eventual draft-aware logic) easier to land without
+ * refactoring.
  */
 export const findVersions: FindVersions = async function findVersions(
   this: DynamoAdapter,
   { collection, limit = 10, page = 1, pagination = true, sort, where },
 ) {
-  const tableName = this.resolveVersionsTableName(collection)
-  const matched = await scanMatching(this, tableName, where)
+  const partition = this.resolveVersionsPartition(collection)
+  const matched = await queryMatching(this, partition, where)
   applySorts(matched, sort)
 
   const totalDocs = matched.length

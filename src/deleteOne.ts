@@ -5,6 +5,7 @@ import { DeleteCommand } from '@aws-sdk/lib-dynamodb'
 import type { DynamoAdapter } from './types.js'
 
 import { findFirst } from './utilities/findFirst.js'
+import { stripInternalKeys } from './utilities/stripInternalKeys.js'
 import { whereToId } from './utilities/whereToId.js'
 
 export const deleteOne: DeleteOne = async function deleteOne(
@@ -16,34 +17,34 @@ export const deleteOne: DeleteOne = async function deleteOne(
     throw new Error('payload-ddb: docClient is not initialized — call connect() first.')
   }
 
-  const tableName = this.resolveTableName(collection)
+  const partition = this.resolvePartition(collection)
   const idFromWhere = whereToId(where)
 
   // Fast path — pure id-equality lets us delete and capture the doc in one call.
   if (idFromWhere !== null) {
     const result = await docClient.send(
       new DeleteCommand({
-        TableName: tableName,
-        Key: { id: idFromWhere },
+        TableName: this.tableName,
+        Key: { pk: partition, sk: String(idFromWhere) },
         ReturnValues: 'ALL_OLD',
       }),
     )
     if (returning === false) {
       return null as never
     }
-    return (result.Attributes ?? null) as never
+    return (result.Attributes ? stripInternalKeys(result.Attributes) : null) as never
   }
 
-  // Slow path — locate by scan, then delete by id.
-  const found = await findFirst(this, { tableName, where })
+  // Slow path — locate by query, then delete by composite key.
+  const found = await findFirst(this, { partition, where })
   if (!found) {
     return null as never
   }
 
   await docClient.send(
     new DeleteCommand({
-      TableName: tableName,
-      Key: { id: found['id'] },
+      TableName: this.tableName,
+      Key: { pk: partition, sk: String(found['id']) },
     }),
   )
 

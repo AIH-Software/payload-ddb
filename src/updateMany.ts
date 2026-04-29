@@ -5,10 +5,11 @@ import { PutCommand } from '@aws-sdk/lib-dynamodb'
 import type { DynamoAdapter } from './types.js'
 
 import { applySorts } from './utilities/applySorts.js'
-import { scanMatching } from './utilities/scanMatching.js'
+import { normalizeForDynamo } from './utilities/normalizeForDynamo.js'
+import { queryMatching } from './utilities/queryMatching.js'
 
 /**
- * v1 strategy: scan-and-collect matches, sort, slice to `limit`, then
+ * v1 strategy: query-and-collect matches, sort, slice to `limit`, then
  * read-merge-write each in parallel. Same merge semantics as `updateOne`:
  * `data` is overlaid on the target and `id` is preserved from the target.
  *
@@ -26,8 +27,8 @@ export const updateMany: UpdateMany = async function updateMany(
     throw new Error('payload-ddb: docClient is not initialized — call connect() first.')
   }
 
-  const tableName = this.resolveTableName(collection)
-  const matched = await scanMatching(this, tableName, where)
+  const partition = this.resolvePartition(collection)
+  const matched = await queryMatching(this, partition, where)
   applySorts(matched, sort)
 
   const targets = limit && limit > 0 ? matched.slice(0, limit) : matched
@@ -46,8 +47,12 @@ export const updateMany: UpdateMany = async function updateMany(
       }
       await docClient.send(
         new PutCommand({
-          TableName: tableName,
-          Item: merged,
+          TableName: this.tableName,
+          Item: normalizeForDynamo({
+            ...merged,
+            pk: partition,
+            sk: String(merged['id']),
+          }),
         }),
       )
       return merged

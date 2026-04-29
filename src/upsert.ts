@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto'
 import type { DynamoAdapter } from './types.js'
 
 import { findFirst } from './utilities/findFirst.js'
+import { normalizeForDynamo } from './utilities/normalizeForDynamo.js'
 
 /**
  * Locate by `where`; merge-and-put if found, put-with-fresh-id otherwise.
@@ -23,8 +24,8 @@ export const upsert: Upsert = async function upsert(
     throw new Error('payload-ddb: docClient is not initialized — call connect() first.')
   }
 
-  const tableName = this.resolveTableName(collection)
-  const found = await findFirst(this, { tableName, where })
+  const partition = this.resolvePartition(collection)
+  const found = await findFirst(this, { partition, where })
 
   const now = new Date().toISOString()
   let item: Record<string, unknown>
@@ -49,8 +50,12 @@ export const upsert: Upsert = async function upsert(
 
   await docClient.send(
     new PutCommand({
-      TableName: tableName,
-      Item: item,
+      TableName: this.tableName,
+      Item: normalizeForDynamo({
+        ...item,
+        pk: partition,
+        sk: String(item['id']),
+      }),
     }),
   )
 

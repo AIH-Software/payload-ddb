@@ -5,6 +5,8 @@ import { GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb'
 import type { DynamoAdapter } from './types.js'
 
 import { findFirst } from './utilities/findFirst.js'
+import { normalizeForDynamo } from './utilities/normalizeForDynamo.js'
+import { stripInternalKeys } from './utilities/stripInternalKeys.js'
 
 /**
  * Same read-merge-write semantics as `updateVersion`. Doesn't cascade
@@ -20,20 +22,21 @@ export const updateGlobalVersion: UpdateGlobalVersion = async function updateGlo
     throw new Error('payload-ddb: docClient is not initialized — call connect() first.')
   }
 
-  const tableName = this.resolveVersionsTableName(args.global)
+  const partition = this.resolveVersionsPartition(args.global)
 
   let target: null | Record<string, unknown> = null
 
   if (args.id !== undefined && args.id !== null) {
     const result = await docClient.send(
       new GetCommand({
-        TableName: tableName,
-        Key: { id: args.id },
+        TableName: this.tableName,
+        Key: { pk: partition, sk: String(args.id) },
+        ConsistentRead: true,
       }),
     )
-    target = result.Item ?? null
+    target = result.Item ? stripInternalKeys(result.Item) : null
   } else if (args.where) {
-    target = await findFirst(this, { tableName, where: args.where })
+    target = await findFirst(this, { partition, where: args.where })
   }
 
   if (!target) {
@@ -48,8 +51,12 @@ export const updateGlobalVersion: UpdateGlobalVersion = async function updateGlo
 
   await docClient.send(
     new PutCommand({
-      TableName: tableName,
-      Item: merged,
+      TableName: this.tableName,
+      Item: normalizeForDynamo({
+        ...merged,
+        pk: partition,
+        sk: String(merged['id']),
+      }),
     }),
   )
 

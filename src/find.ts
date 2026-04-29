@@ -3,15 +3,17 @@ import type { Find, PaginatedDocs } from 'payload'
 import type { DynamoAdapter } from './types.js'
 
 import { applySorts } from './utilities/applySorts.js'
-import { scanMatching } from './utilities/scanMatching.js'
+import { queryMatching } from './utilities/queryMatching.js'
 
 /**
- * v1 strategy: paginated `Scan` over the entire collection table, in-memory
- * `where` filtering, in-memory sort, in-memory page slice. Correct but O(N).
+ * v2 strategy: paginated `Query` over the collection's partition (`pk = slug`)
+ * with `where` translated to `FilterExpression`, then in-memory sort and page
+ * slice. `Query` reads only the rows in this collection's partition, so we no
+ * longer pay to walk the whole table.
  *
  * Optimizations to land later:
- *  - Translate `where` into a `FilterExpression` to reduce network bytes.
- *  - Use `Query` against a GSI when the predicate matches an indexed key.
+ *  - Use `Query` against a GSI when the predicate matches an indexed key
+ *    (e.g. `email` for auth, `slug` for public-facing collections).
  *  - Stream pages instead of materializing all matches when `pagination=false`
  *    and `limit` is small.
  */
@@ -19,7 +21,7 @@ export const find: Find = async function find(
   this: DynamoAdapter,
   { collection, limit = 10, page = 1, pagination = true, sort, where },
 ) {
-  const matched = await scanMatching(this, this.resolveTableName(collection), where)
+  const matched = await queryMatching(this, this.resolvePartition(collection), where)
   applySorts(matched, sort)
 
   const totalDocs = matched.length

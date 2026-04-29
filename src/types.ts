@@ -55,25 +55,20 @@ export type Args = {
    */
   translateConfig?: TranslateConfig
   /**
-   * Prefix prepended to every table name. Useful for multi-tenant or
-   * multi-environment deployments (e.g. `staging_`, `prod_`).
+   * Name of the single DynamoDB table that backs every collection, global,
+   * and version. The adapter expects a composite-key schema (`pk` + `sk`).
    *
-   * @default ''
+   * @default 'payload'
    */
-  tablePrefix?: string
-  /**
-   * Explicit table-name overrides per collection or global slug. When a slug
-   * is not found here, the adapter falls back to `${tablePrefix}${slug}`.
-   */
-  tableNames?: Record<string, string>
+  tableName?: string
   /**
    * Path to read and write migration files from.
    * @default 'migrations'
    */
   migrationDir?: string
   /**
-   * If true, methods that mutate the schema (table creation, GSI updates) may
-   * be invoked at init time. Disable this in production where infra is managed
+   * If true, the adapter will provision the table at init time when it
+   * doesn't already exist. Disable in production where infra is managed
    * out-of-band (CDK, Terraform, CloudFormation).
    *
    * @default false
@@ -86,7 +81,7 @@ export type Args = {
  *
  * Method implementations should be defined as `function` declarations (not
  * arrows) and may use `this: DynamoAdapter` to reach the live client and
- * resolved table-name map.
+ * resolved partition keys.
  */
 export interface DynamoAdapter extends BaseDatabaseAdapter {
   /** Underlying low-level DynamoDB client. Populated by `connect`. */
@@ -98,17 +93,21 @@ export interface DynamoAdapter extends BaseDatabaseAdapter {
   translateConfig: TranslateConfig
   /** True when the adapter constructed `client` itself and owns its lifecycle. */
   ownsClient: boolean
-  tablePrefix: string
-  tableNames: Record<string, string>
+  /** The single table name that backs all collections, globals, and versions. */
+  tableName: string
   ensureTables: boolean
-  /** Resolve a collection or global slug to its physical table name. */
-  resolveTableName: (slug: CollectionSlug | GlobalSlug | string) => string
   /**
-   * Resolve a slug to its versions sibling table — `${baseTable}_versions`.
-   * Always derived from `resolveTableName`, so explicit overrides set in
-   * `tableNames` propagate (e.g. `auth_users` → `auth_users_versions`).
+   * Resolve a collection or global slug to its DynamoDB partition key value.
+   * Today this is the slug verbatim — kept as a method so future schemes
+   * (e.g. tenant-scoped prefixes) can land without touching every method.
    */
-  resolveVersionsTableName: (slug: CollectionSlug | GlobalSlug | string) => string
+  resolvePartition: (slug: CollectionSlug | GlobalSlug | string) => string
+  /**
+   * Resolve a slug to the partition key value used for its versions —
+   * `${slug}_versions`. Mirrors the v1 `_versions` sibling-table convention,
+   * just expressed as a partition within the single table.
+   */
+  resolveVersionsPartition: (slug: CollectionSlug | GlobalSlug | string) => string
 }
 
 export type BuildSchemaOptions = {

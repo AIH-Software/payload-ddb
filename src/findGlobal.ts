@@ -5,10 +5,11 @@ import { GetCommand } from '@aws-sdk/lib-dynamodb'
 import type { DynamoAdapter } from './types.js'
 
 import { matchesWhere } from './utilities/matchesWhere.js'
+import { stripInternalKeys } from './utilities/stripInternalKeys.js'
 
 /**
- * Globals are singleton documents. Each slug owns its own table; the row's
- * primary key is the slug itself, so reads are a single `GetItem`.
+ * Globals are singleton documents. Each lives at `pk = slug, sk = slug`, so
+ * reads are a single `GetItem`.
  *
  * The optional `where` is applied as a post-filter via `matchesWhere` —
  * Payload uses it sparingly (mostly for guards) and the row is already
@@ -25,16 +26,18 @@ export const findGlobal: FindGlobal = async function findGlobal(
 
   const result = await docClient.send(
     new GetCommand({
-      TableName: this.resolveTableName(slug),
-      Key: { id: slug },
+      TableName: this.tableName,
+      Key: { pk: this.resolvePartition(slug), sk: slug },
+      ConsistentRead: true,
     }),
   )
 
   if (!result.Item) {
     return null as never
   }
-  if (where && !matchesWhere(result.Item, where)) {
+  const item = stripInternalKeys(result.Item)
+  if (where && !matchesWhere(item, where)) {
     return null as never
   }
-  return result.Item as never
+  return item as never
 }

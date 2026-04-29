@@ -4,11 +4,11 @@ import { DeleteCommand } from '@aws-sdk/lib-dynamodb'
 
 import type { DynamoAdapter } from './types.js'
 
-import { scanMatching } from './utilities/scanMatching.js'
+import { queryMatching } from './utilities/queryMatching.js'
 
 /**
- * Same scan + parallel delete pattern as `deleteMany`, but routes to the
- * versions table for either a collection (`collection`) or a global
+ * Same query + parallel delete pattern as `deleteMany`, but routes to the
+ * versions partition for either a collection (`collection`) or a global
  * (`globalSlug`). Payload guarantees exactly one of those two slugs is
  * present.
  */
@@ -26,15 +26,15 @@ export const deleteVersions: DeleteVersions = async function deleteVersions(
     throw new Error('payload-ddb: deleteVersions requires either `collection` or `globalSlug`.')
   }
 
-  const tableName = this.resolveVersionsTableName(slug)
-  const matched = await scanMatching(this, tableName, where)
+  const partition = this.resolveVersionsPartition(slug)
+  const matched = await queryMatching(this, partition, where)
 
   await Promise.all(
     matched.map((target) =>
       docClient.send(
         new DeleteCommand({
-          TableName: tableName,
-          Key: { id: target['id'] },
+          TableName: this.tableName,
+          Key: { pk: partition, sk: String(target['id']) },
         }),
       ),
     ),

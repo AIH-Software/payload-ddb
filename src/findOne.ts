@@ -8,6 +8,6 @@ export const findOne: FindOne = async function findOne(
   this: DynamoAdapter,
   { collection, where },
 ) {
-  const found = await findFirst(this, { tableName: this.resolveTableName(collection), where })
+  const found = await findFirst(this, { partition: this.resolvePartition(collection), where })
   return (found ?? null) as never
 }

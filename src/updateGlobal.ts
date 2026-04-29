@@ -4,6 +4,9 @@ import { GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb'
 
 import type { DynamoAdapter } from './types.js'
 
+import { normalizeForDynamo } from './utilities/normalizeForDynamo.js'
+import { stripInternalKeys } from './utilities/stripInternalKeys.js'
+
 /**
  * Read-merge-write for the global's singleton row. Per Payload's contract,
  * if the global doesn't exist callers should use `createGlobal` first — we
@@ -19,27 +22,31 @@ export const updateGlobal: UpdateGlobal = async function updateGlobal(
     throw new Error('payload-ddb: docClient is not initialized — call connect() first.')
   }
 
-  const tableName = this.resolveTableName(slug)
+  const partition = this.resolvePartition(slug)
 
-  const existing = (
-    await docClient.send(
-      new GetCommand({
-        TableName: tableName,
-        Key: { id: slug },
-      }),
-    )
-  ).Item
+  const result = await docClient.send(
+    new GetCommand({
+      TableName: this.tableName,
+      Key: { pk: partition, sk: slug },
+      ConsistentRead: true,
+    }),
+  )
 
-  if (!existing) {
+  if (!result.Item) {
     return null as never
   }
 
+  const existing = stripInternalKeys(result.Item)
   const merged: Record<string, unknown> = { ...existing, ...data, id: slug }
 
   await docClient.send(
     new PutCommand({
-      TableName: tableName,
-      Item: merged,
+      TableName: this.tableName,
+      Item: normalizeForDynamo({
+        ...merged,
+        pk: partition,
+        sk: slug,
+      }),
     }),
   )
 

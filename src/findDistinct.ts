@@ -4,11 +4,12 @@ import type { DynamoAdapter } from './types.js'
 
 import { applySorts } from './utilities/applySorts.js'
 import { getByPath } from './utilities/getByPath.js'
-import { scanMatching } from './utilities/scanMatching.js'
+import { queryMatching } from './utilities/queryMatching.js'
 
 /**
- * v1 strategy: paginated `Scan`, JS `where` filter, dedup via `Set`, then
- * sort + paginate the resulting value list.
+ * v2 strategy: paginated `Query` over the collection's partition, JS `where`
+ * filter has already been pushed down via `FilterExpression`, then dedup via
+ * `Set` and sort + paginate the resulting value list.
  *
  * Dedup uses primitive equality. Object- or array-valued fields would compare
  * by reference, so if you `findDistinct` over a non-primitive field you'll
@@ -19,7 +20,7 @@ export const findDistinct: FindDistinct = async function findDistinct(
   this: DynamoAdapter,
   { collection, field, limit = 10, page = 1, sort, where },
 ) {
-  const matched = await scanMatching(this, this.resolveTableName(collection), where)
+  const matched = await queryMatching(this, this.resolvePartition(collection), where)
 
   const seen = new Set<unknown>()
   const values: Record<string, unknown>[] = []

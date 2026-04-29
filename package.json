@@ -1,6 +1,6 @@
 {
   "name": "@aih-pkg/payload-ddb",
-  "version": "1.1.0",
+  "version": "2.0.0",
   "description": "An unofficial database provider for PayloadCMS, utilizing DynamoDb",
   "keywords": [
     "payloadcms",
@@ -34,7 +34,7 @@
     "dist"
   ],
   "scripts": {
-    "build": "swc src -d dist --strip-leading-paths",
+    "build": "swc src -d dist --strip-leading-paths && tsc --emitDeclarationOnly",
     "prepublishOnly": "pnpm run build",
     "test": "exit 0"
   },

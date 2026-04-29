@@ -5,6 +5,8 @@ import { randomUUID } from 'node:crypto'
 
 import type { DynamoAdapter } from './types.js'
 
+import { normalizeForDynamo } from './utilities/normalizeForDynamo.js'
+
 export const create: Create = async function create(
   this: DynamoAdapter,
   { collection, customID, data, returning },
@@ -29,8 +31,12 @@ export const create: Create = async function create(
 
   await docClient.send(
     new PutCommand({
-      TableName: this.resolveTableName(collection),
-      Item: item,
+      TableName: this.tableName,
+      Item: normalizeForDynamo({
+        ...item,
+        pk: this.resolvePartition(collection),
+        sk: String(id),
+      }),
     }),
   )
 
