@@ -15,15 +15,9 @@ import { queryMatching } from './utilities/queryMatching.js'
  *     looks like a doc — this lets the user's `where` / `sort` operate in
  *     doc-field terms instead of `version.x` paths.
  *  3. Fill in any docs that have a row in the *main* partition but no
- *     `latest=true` version row. This covers three cases:
+ *     `latest=true` version row. This covers two cases:
  *     - documents created before versioning was enabled
  *     - data orphaned by historical adapter bugs that dropped version writes
- *     - Payload's prune-on-create flow that issues
- *       `deleteVersions where updatedAt <= newVersion.updatedAt` and
- *       (because we serialize timestamps at ms precision and Payload reuses
- *       the same `Date` for both the version's `updatedAt` and the prune
- *       cutoff) ends up matching the just-created row, leaving the main
- *       collection populated but the versions partition empty.
  *  4. Apply `where` post-projection, sort, paginate.
  *
  * No `_status` filter is applied — `queryDrafts` returns the latest version
@@ -66,17 +60,17 @@ export const queryDrafts: QueryDrafts = async function queryDrafts(
   applySorts(matched, sort)
 
   const totalDocs = matched.length
-  const useLimit = pagination && limit > 0
-  const effectiveLimit = useLimit ? limit : totalDocs
-  const totalPages = useLimit ? Math.max(1, Math.ceil(totalDocs / limit)) : 1
+  const useLimit = limit > 0
   const safePage = useLimit ? Math.max(1, page) : 1
 
   const start = useLimit ? (safePage - 1) * limit : 0
   const end = useLimit ? start + limit : totalDocs
   const docs = matched.slice(start, end)
 
-  const hasNextPage = useLimit && safePage < totalPages
-  const hasPrevPage = useLimit && safePage > 1
+  const effectiveLimit = useLimit ? limit : totalDocs
+  const totalPages = pagination && useLimit ? Math.max(1, Math.ceil(totalDocs / limit)) : 1
+  const hasNextPage = pagination && useLimit && safePage < totalPages
+  const hasPrevPage = pagination && useLimit && safePage > 1
 
   const result: PaginatedDocs<Record<string, unknown>> = {
     docs,

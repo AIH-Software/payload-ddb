@@ -14,17 +14,17 @@ export const findGlobalVersions: FindGlobalVersions = async function findGlobalV
   applySorts(matched, sort)
 
   const totalDocs = matched.length
-  const useLimit = pagination && limit > 0
-  const effectiveLimit = useLimit ? limit : totalDocs
-  const totalPages = useLimit ? Math.max(1, Math.ceil(totalDocs / limit)) : 1
+  const useLimit = limit > 0
   const safePage = useLimit ? Math.max(1, page) : 1
 
   const start = useLimit ? (safePage - 1) * limit : 0
   const end = useLimit ? start + limit : totalDocs
   const docs = matched.slice(start, end)
 
-  const hasNextPage = useLimit && safePage < totalPages
-  const hasPrevPage = useLimit && safePage > 1
+  const effectiveLimit = useLimit ? limit : totalDocs
+  const totalPages = pagination && useLimit ? Math.max(1, Math.ceil(totalDocs / limit)) : 1
+  const hasNextPage = pagination && useLimit && safePage < totalPages
+  const hasPrevPage = pagination && useLimit && safePage > 1
 
   const result: PaginatedDocs<Record<string, unknown>> = {
     docs,

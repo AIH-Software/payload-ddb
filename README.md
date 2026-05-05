@@ -112,13 +112,10 @@ the four global version methods, and `queryDrafts`.
   `in`, `not_in`, `and`, `or`. Anything else throws — by design, so coverage
   gaps surface loudly. Range and `like`/`contains` operators land alongside
   `FilterExpression` translation.
-- **Transactions are no-op.** `beginTransaction` returns `null`; commit/rollback
-  do nothing. `TransactWriteItems` wiring is its own milestone.
-- **`createVersion`/`createGlobalVersion` aren't atomic.** Three round-trips
-  per call (find prev latest → flip its flag → put new). A crash mid-sequence
-  can leave two `latest=true` rows. `TransactWriteItems` will close the gap.
-- **No drafts-only document support.** A collection with `versions.drafts: true`
-  but no published row yet is not yet handled.
+- **Payload-level transactions are no-op.** `beginTransaction` returns `null`;
+  commit/rollback do nothing. Per-method atomicity (e.g. `createVersion`'s
+  flip+put) uses DynamoDB `TransactWriteItems` already; full Payload-context
+  transaction buffering across multiple adapter calls is its own milestone.
 
 ## Migrating from v1
 

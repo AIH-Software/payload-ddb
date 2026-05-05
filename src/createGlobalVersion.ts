@@ -1,16 +1,17 @@
 import type { CreateGlobalVersion } from 'payload'
 
-import { PutCommand } from '@aws-sdk/lib-dynamodb'
+import { TransactWriteCommand } from '@aws-sdk/lib-dynamodb'
 import { randomUUID } from 'node:crypto'
 
 import type { DynamoAdapter } from './types.js'
 
-import { flipPreviousLatest } from './utilities/flipPreviousLatest.js'
+import { findFirst } from './utilities/findFirst.js'
 import { normalizeForDynamo } from './utilities/normalizeForDynamo.js'
 
 /**
  * Like `createVersion` but for global singletons: there's no `parent`, and
- * the "latest" scope is the entire global's versions partition.
+ * the "latest" scope is the entire global's versions partition. Same atomic
+ * flip+put via `TransactWriteItems`. See `createVersion` for rationale.
  */
 export const createGlobalVersion: CreateGlobalVersion = async function createGlobalVersion(
   this: DynamoAdapter,
@@ -32,7 +33,10 @@ export const createGlobalVersion: CreateGlobalVersion = async function createGlo
 
   const partition = this.resolveVersionsPartition(globalSlug)
 
-  await flipPreviousLatest(this, partition, { latest: { equals: true } })
+  const previousLatest = await findFirst(this, {
+    partition,
+    where: { latest: { equals: true } },
+  })
 
   const id = randomUUID()
   const item: Record<string, unknown> = {
@@ -46,16 +50,37 @@ export const createGlobalVersion: CreateGlobalVersion = async function createGlo
     ...(publishedLocale !== undefined ? { publishedLocale } : {}),
   }
 
-  await docClient.send(
-    new PutCommand({
+  const putItem = normalizeForDynamo({
+    ...item,
+    pk: partition,
+    sk: id,
+  })
+
+  const transactItems: NonNullable<
+    ConstructorParameters<typeof TransactWriteCommand>[0]['TransactItems']
+  > = []
+
+  if (previousLatest) {
+    transactItems.push({
+      Update: {
+        TableName: this.tableName,
+        Key: { pk: partition, sk: String(previousLatest['id']) },
+        UpdateExpression: 'SET #latest = :false',
+        ExpressionAttributeNames: { '#latest': 'latest' },
+        ExpressionAttributeValues: { ':false': false },
+        ConditionExpression: 'attribute_exists(pk)',
+      },
+    })
+  }
+
+  transactItems.push({
+    Put: {
       TableName: this.tableName,
-      Item: normalizeForDynamo({
-        ...item,
-        pk: partition,
-        sk: id,
-      }),
-    }),
-  )
+      Item: putItem,
+    },
+  })
+
+  await docClient.send(new TransactWriteCommand({ TransactItems: transactItems }))
 
   return returning === false ? (null as never) : (item as never)
 }
