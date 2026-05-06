@@ -1,0 +1,21 @@
+# DynamoDB Local for the integration test suite.
+#
+# Listens on 8001 (not the default 8000) to dodge the common Apollo/AWS-CLI
+# port collision so a developer who already has 8000 in use can still run
+# `pnpm test` without surgery. Override with PAYLOAD_DDB_TEST_PORT in CI/local
+# if needed — `__helpers/assertDbReachable.ts` reads the same var.
+services:
+  dynamodb-local:
+    image: amazon/dynamodb-local:latest
+    container_name: payload-ddb-test
+    ports:
+      - "${PAYLOAD_DDB_TEST_PORT:-8001}:8000"
+    # `-inMemory` skips persistence — every container start is a clean slate.
+    # `-sharedDb` makes credentials/region irrelevant: every test connects to
+    # the same in-memory store regardless of what AWS_REGION it claims to use.
+    command: -jar DynamoDBLocal.jar -inMemory -sharedDb
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000 || exit 1"]
+      interval: 2s
+      timeout: 2s
+      retries: 10

@@ -39,12 +39,13 @@ export const upsert: Upsert = async function upsert(
     }
   } else {
     const id = data['id'] ?? randomUUID()
-    // Default both timestamps; `data` overrides if present (matches `create`).
+    // Same nullish-coalesce pattern as `create`: explicit values in `data`
+    // win, but a payload-passed `undefined` doesn't wipe the default.
     item = {
-      createdAt: now,
-      updatedAt: now,
       ...data,
       id,
+      createdAt: data['createdAt'] ?? now,
+      updatedAt: data['updatedAt'] ?? now,
     }
   }
 

@@ -40,7 +40,12 @@
   "scripts": {
     "build": "swc src -d dist --strip-leading-paths && tsc --emitDeclarationOnly",
     "prepublishOnly": "pnpm run build",
-    "test": "exit 0"
+    "docker:start": "docker compose up -d dynamodb-local",
+    "docker:stop": "docker compose down",
+    "docker:logs": "docker compose logs -f dynamodb-local",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck:test": "tsc -p test/tsconfig.json"
   },
   "peerDependencies": {
     "payload": ">=3.0.0"
@@ -54,7 +59,8 @@
     "@swc/core": "^1.15.32",
     "@types/node": "^25.6.0",
     "payload": "^3.84.1",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "vitest": "^3.0.0"
   },
   "pnpm": {
     "onlyBuiltDependencies": [

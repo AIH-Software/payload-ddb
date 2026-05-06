@@ -38,5 +38,9 @@
     "noUncheckedSideEffectImports": true,
     "moduleDetection": "force",
     "skipLibCheck": true,
-  }
+  },
+  // Restrict to src so the build doesn't pick up test/, vitest.config.ts,
+  // etc. (which live outside `rootDir`). The test suite has its own
+  // tsconfig at test/tsconfig.json that includes both src and test.
+  "include": ["src/**/*"]
 }

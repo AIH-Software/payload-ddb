@@ -18,15 +18,16 @@ export const create: Create = async function create(
 
   const id = customID ?? data['id'] ?? randomUUID()
   const now = new Date().toISOString()
-  // Defaults below `data` so explicit timestamps in `data` win — Payload's
-  // versions/restore flows pass them through, and migrations may want to
-  // backdate. `id` is last to resolve any clash between `customID` and
-  // `data.id`.
+  // Spread `data` first, then nullish-coalesce timestamps. Explicit values
+  // in `data` (versions/restore, migrations backdating) still win, but a
+  // payload-passed `data.createdAt = undefined` no longer wipes the default
+  // back to undefined — which the marshaller would then drop with
+  // `removeUndefinedValues: true`, leaving the row without timestamps.
   const item: Record<string, unknown> = {
-    createdAt: now,
-    updatedAt: now,
     ...data,
     id,
+    createdAt: data['createdAt'] ?? now,
+    updatedAt: data['updatedAt'] ?? now,
   }
 
   await docClient.send(

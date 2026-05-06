@@ -75,7 +75,6 @@ value in the same physical table.
 | `translateConfig` | `TranslateConfig` | `removeUndefinedValues: true`, `convertClassInstanceToMap: true` | Marshalling options forwarded to `DynamoDBDocumentClient.from`. |
 | `tableName` | `string` | `'payload'` | The single DynamoDB table backing every collection, global, and versions stream. |
 | `ensureTables` | `boolean` | `false` | When true, auto-creates the table at init if it doesn't exist. Dev-loop convenience; turn off in production. |
-| `migrationDir` | `string` | `'migrations'` | Path to read/write migration files. |
 
 ## Data layout
 
@@ -100,6 +99,13 @@ All `BaseDatabaseAdapter` methods: `create`, `find`, `findOne`, `findDistinct`,
 `createGlobal`/`findGlobal`/`updateGlobal`, the five collection version methods,
 the four global version methods, and `queryDrafts`.
 
+Supported `where` operators: `equals`, `not_equals`, `greater_than`,
+`greater_than_equal`, `less_than`, `less_than_equal`, `in`, `not_in`, `exists`,
+`like`, plus `and` / `or` composition. Anything else throws by design so
+coverage gaps surface loudly. `like` is case-insensitive and evaluated in JS
+(DynamoDB's `contains()` is case-sensitive, so the adapter doesn't push it
+down).
+
 ## Known limits / future work
 
 - **No GSI routing.** Every non-id read is a `Query` against the collection's
@@ -108,21 +114,32 @@ the four global version methods, and `queryDrafts`.
   wire). Adding GSIs that mirror Payload's common access patterns
   (e.g. `email` for auth, `slug` for public-facing collections) is the
   highest-impact remaining optimization milestone.
-- **Limited `where` operator coverage.** `equals`, `not_equals`, `exists`,
-  `in`, `not_in`, `and`, `or`. Anything else throws — by design, so coverage
-  gaps surface loudly. Range and `like`/`contains` operators land alongside
-  `FilterExpression` translation.
 - **Payload-level transactions are no-op.** `beginTransaction` returns `null`;
   commit/rollback do nothing. Per-method atomicity (e.g. `createVersion`'s
   flip+put) uses DynamoDB `TransactWriteItems` already; full Payload-context
   transaction buffering across multiple adapter calls is its own milestone.
 
-## Migrating from v1
+## Development
 
-v1 used one table per collection/global plus a `_versions` sibling. v2 uses
-a single table and a composite `pk`/`sk` key. There is no automatic data
-migration — the schema, table name, and row shape all changed. If you were
-running v1 in production, plan a one-time export-and-reimport.
+The package ships with a vitest integration test harness that boots Payload
+against DynamoDB Local. Each spec file uses a unique table name so vitest
+workers can run in parallel against a single shared container.
+
+```bash
+pnpm install
+pnpm docker:start   # boots amazon/dynamodb-local on :8001
+pnpm test           # runs every test/**/*.int.spec.ts once
+pnpm test:watch     # vitest in watch mode
+pnpm typecheck:test # tsc -p test/tsconfig.json
+pnpm docker:stop    # tears the container down
+```
+
+`pnpm test` fails fast with a friendly message if the container isn't
+reachable. Override the host/port with `PAYLOAD_DDB_TEST_HOST` /
+`PAYLOAD_DDB_TEST_PORT` if 8001 conflicts on your machine.
+
+See [`test/README.md`](./test/README.md) for the harness layout and how to
+add a new spec.
 
 ## License
 
