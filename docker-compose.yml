@@ -14,8 +14,7 @@ services:
     # `-sharedDb` makes credentials/region irrelevant: every test connects to
     # the same in-memory store regardless of what AWS_REGION it claims to use.
     command: -jar DynamoDBLocal.jar -inMemory -sharedDb
-    healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8000 || exit 1"]
-      interval: 2s
-      timeout: 2s
-      retries: 10
+    # No healthcheck: the amazon/dynamodb-local image has neither curl nor
+    # wget, so anything we put here would always be unhealthy. Readiness is
+    # gated by `test/__helpers/assertDbReachable.ts`, which issues a real
+    # `ListTables` call from globalSetup before any worker boots.

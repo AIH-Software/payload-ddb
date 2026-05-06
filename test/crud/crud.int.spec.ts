@@ -13,7 +13,9 @@ beforeAll(async () => {
 })
 
 afterAll(async () => {
-  await handle.cleanup()
+  // `handle` is undefined when beforeAll threw before assignment. Guard so
+  // afterAll's TypeError doesn't mask the real error from beforeAll.
+  await (handle as TestHandle | undefined)?.cleanup()
 })
 
 beforeEach(async () => {
