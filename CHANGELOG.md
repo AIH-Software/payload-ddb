@@ -1,5 +1,11 @@
 # @aih-software/payload-ddb
 
+## 2.4.0
+
+### Minor Changes
+
+- 7ded07c: Updated docs
+
 ## 2.3.0
 
 ### Minor Changes
