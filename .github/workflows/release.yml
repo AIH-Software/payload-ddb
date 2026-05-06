@@ -1,0 +1,108 @@
+name: Release
+run-name: Release on push to ${{ github.ref_name }}
+
+on:
+  push:
+    branches: [main]
+
+# Cancel-in-progress is off: a release run that's already publishing must not
+# be killed by the next push, or we'd leave half-applied tags/versions behind.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # commit version bump, push tag, create GitHub release
+  packages: write   # publish to GitHub Packages
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Full history so `changeset status` can compare against `main`'s
+          # base branch and produce a stable release set.
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@aih-software'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Start DynamoDB Local
+        run: docker compose up -d dynamodb-local
+
+      - name: Run integration tests
+        run: pnpm test
+
+      - name: Stop DynamoDB Local
+        if: always()
+        run: docker compose down
+
+      - name: Compute pending bump
+        id: gate
+        run: |
+          # `changeset status` writes a JSON manifest of pending releases.
+          # Tolerate the no-changeset case — emit an empty file so the gate
+          # script handles it identically to ENOENT.
+          pnpm changeset status --output=/tmp/changeset-status.json || echo '{}' > /tmp/changeset-status.json
+          node scripts/should-release.mjs /tmp/changeset-status.json
+
+      - name: Apply version bumps
+        if: steps.gate.outputs.should-release == 'true'
+        run: pnpm changeset version
+
+      - name: Build
+        if: steps.gate.outputs.should-release == 'true'
+        run: pnpm build
+
+      - name: Commit, tag, push
+        if: steps.gate.outputs.should-release == 'true'
+        run: |
+          version=$(node -p "require('./package.json').version")
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add -A
+          # `[skip ci]` keeps this push from re-triggering the workflow.
+          git commit -m "chore(release): v${version} [skip ci]"
+          git tag "v${version}"
+          git push origin HEAD:main
+          git push origin "v${version}"
+
+      - name: Publish to GitHub Packages
+        if: steps.gate.outputs.should-release == 'true'
+        run: pnpm publish --no-git-checks
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create GitHub Release
+        if: steps.gate.outputs.should-release == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version=$(node -p "require('./package.json').version")
+          # Extract the freshly-prepended section from CHANGELOG.md (between
+          # the first `## ` heading and the second). Falls back to a generic
+          # message if the file is missing or malformed.
+          notes=$(awk '/^## /{ if (++n==2) exit } n==1' CHANGELOG.md || true)
+          if [ -z "$notes" ]; then notes="Release v${version}"; fi
+          gh release create "v${version}" \
+            --title "v${version}" \
+            --notes "$notes"
+
+      - name: Skip summary
+        if: steps.gate.outputs.should-release != 'true'
+        run: |
+          echo "No release this run — pending bump is '${{ steps.gate.outputs.bump }}'."
+          echo "Patch-only batches stay queued until a minor/major changeset lands."

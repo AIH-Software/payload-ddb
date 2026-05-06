@@ -45,7 +45,8 @@
     "docker:logs": "docker compose logs -f dynamodb-local",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck:test": "tsc -p test/tsconfig.json"
+    "typecheck:test": "tsc -p test/tsconfig.json",
+    "changeset": "changeset"
   },
   "peerDependencies": {
     "payload": ">=3.0.0"
@@ -55,6 +56,7 @@
     "@aws-sdk/lib-dynamodb": "^3.1038.0"
   },
   "devDependencies": {
+    "@changesets/cli": "^2.27.0",
     "@swc/cli": "^0.8.1",
     "@swc/core": "^1.15.32",
     "@types/node": "^25.6.0",
