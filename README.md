@@ -123,7 +123,7 @@ down).
 
 The package ships with a vitest integration test harness that boots Payload
 against DynamoDB Local. Each spec file uses a unique table name so vitest
-workers can run in parallel against a single shared container.
+workers can run in parallel against a single shared container. Also make sure port 8000 is open.
 
 ```bash
 pnpm install
