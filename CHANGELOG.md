@@ -1,5 +1,11 @@
 # @aih-software/payload-ddb
 
+## 2.5.0
+
+### Minor Changes
+
+- 02fe6a5: Adds github actions for publishing public pkg, removes test artifacts
+
 ## 2.4.0
 
 ### Minor Changes
