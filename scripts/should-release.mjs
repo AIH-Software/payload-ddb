@@ -7,10 +7,8 @@ import { argv, env, exit } from 'node:process'
  * Reads the JSON written by `changeset status --output=...` and emits two
  * GitHub Actions outputs:
  *   - `bump`           — highest pending bump level (`none|patch|minor|major`)
- *   - `should-release` — `true` only when `bump` is `minor` or `major`
- *
- * Patch-only batches stay queued: the workflow exits cleanly without
- * versioning or publishing, so the next minor/major bump bundles them in.
+ *   - `should-release` — `true` for any pending bump (patch/minor/major).
+ *     The workflow uses `bump` to decide which registries to publish to.
  */
 
 const statusPath = argv[2] ?? '/tmp/changeset-status.json'
@@ -33,7 +31,7 @@ for (const r of releases) {
 }
 
 const bump = order[max] ?? 'none'
-const shouldRelease = max >= 2
+const shouldRelease = max >= 1
 
 const lines = `bump=${bump}\nshould-release=${shouldRelease}\n`
 process.stdout.write(lines)

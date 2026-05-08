@@ -18,6 +18,10 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    outputs:
+      should-release: ${{ steps.gate.outputs.should-release }}
+      bump: ${{ steps.gate.outputs.bump }}
+      version: ${{ steps.version.outputs.version }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -67,10 +71,15 @@ jobs:
         if: steps.gate.outputs.should-release == 'true'
         run: pnpm build
 
+      - name: Capture version
+        id: version
+        if: steps.gate.outputs.should-release == 'true'
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
       - name: Commit, tag, push
         if: steps.gate.outputs.should-release == 'true'
         run: |
-          version=$(node -p "require('./package.json').version")
+          version=${{ steps.version.outputs.version }}
           git config user.name 'github-actions[bot]'
           git config user.email 'github-actions[bot]@users.noreply.github.com'
           git add -A
@@ -91,7 +100,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          version=$(node -p "require('./package.json').version")
+          version=${{ steps.version.outputs.version }}
           # Extract the freshly-prepended section from CHANGELOG.md (between
           # the first `## ` heading and the second). Falls back to a generic
           # message if the file is missing or malformed.
@@ -104,5 +113,53 @@ jobs:
       - name: Skip summary
         if: steps.gate.outputs.should-release != 'true'
         run: |
-          echo "No release this run — pending bump is '${{ steps.gate.outputs.bump }}'."
-          echo "Patch-only batches stay queued until a minor/major changeset lands."
+          echo "No release this run — no pending changesets."
+
+  # Minor and major releases also publish to the public npmjs registry.
+  # Patch releases stay GitHub-Packages-only — external consumers shouldn't
+  # be churned by every internal patch, only by intentional feature/breaking
+  # changes.
+  publish-public:
+    needs: release
+    if: needs.release.outputs.bump == 'minor' || needs.release.outputs.bump == 'major'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout at release tag
+        uses: actions/checkout@v4
+        with:
+          ref: v${{ needs.release.outputs.version }}
+
+      - name: Enable Corepack
+        run: corepack enable
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          registry-url: 'https://registry.npmjs.org'
+          scope: '@aih-software'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Retarget publishConfig at npmjs
+        # package.json's publishConfig points at GitHub Packages with
+        # restricted access; rewrite it in-place so `pnpm publish` lands
+        # on npmjs as a public package. The change is never committed.
+        run: |
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            pkg.publishConfig = { registry: 'https://registry.npmjs.org', access: 'public' };
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+
+      - name: Publish to npmjs
+        run: pnpm publish --no-git-checks --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
