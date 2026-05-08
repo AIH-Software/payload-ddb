@@ -7,6 +7,7 @@ import type { DynamoAdapter } from './types.js'
 
 import { findFirst } from './utilities/findFirst.js'
 import { normalizeForDynamo } from './utilities/normalizeForDynamo.js'
+import { projectForCollection } from './utilities/resolveSchema.js'
 
 /**
  * Locate by `where`; merge-and-put if found, put-with-fresh-id otherwise.
@@ -49,16 +50,18 @@ export const upsert: Upsert = async function upsert(
     }
   }
 
+  const projected = projectForCollection(this, collection, item)
+
   await docClient.send(
     new PutCommand({
       TableName: this.tableName,
       Item: normalizeForDynamo({
-        ...item,
+        ...projected,
         pk: partition,
-        sk: String(item['id']),
+        sk: String(projected['id']),
       }),
     }),
   )
 
-  return returning === false ? (null as never) : (item as never)
+  return returning === false ? (null as never) : (projected as never)
 }

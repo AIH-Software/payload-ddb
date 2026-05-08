@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto'
 import type { DynamoAdapter } from './types.js'
 
 import { normalizeForDynamo } from './utilities/normalizeForDynamo.js'
+import { projectForCollection } from './utilities/resolveSchema.js'
 
 export const create: Create = async function create(
   this: DynamoAdapter,
@@ -29,17 +30,21 @@ export const create: Create = async function create(
     createdAt: data['createdAt'] ?? now,
     updatedAt: data['updatedAt'] ?? now,
   }
+  // Project against the collection's declared fields. DDB has no schema
+  // layer, so without this any stray request-body key (notoriously the
+  // registration form's `confirm-password`) would persist verbatim.
+  const projected = projectForCollection(this, collection, item)
 
   await docClient.send(
     new PutCommand({
       TableName: this.tableName,
       Item: normalizeForDynamo({
-        ...item,
+        ...projected,
         pk: this.resolvePartition(collection),
         sk: String(id),
       }),
     }),
   )
 
-  return returning === false ? (null as never) : item
+  return returning === false ? (null as never) : projected
 }

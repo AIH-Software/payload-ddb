@@ -6,6 +6,7 @@ import type { DynamoAdapter } from './types.js'
 
 import { findFirst } from './utilities/findFirst.js'
 import { normalizeForDynamo } from './utilities/normalizeForDynamo.js'
+import { projectVersionRow } from './utilities/resolveSchema.js'
 import { stripInternalKeys } from './utilities/stripInternalKeys.js'
 
 /**
@@ -55,14 +56,22 @@ export const updateVersion: UpdateVersion = async function updateVersion(
     ...args.versionData,
     id: target['id'],
   }
+  // Project both the version-row metadata layer and the inner `version`
+  // snapshot. Catches stray keys at either layer plus stale leaks already
+  // persisted on the target.
+  const projected = projectVersionRow(
+    this,
+    { kind: 'collection', slug: args.collection },
+    merged,
+  )
 
   await docClient.send(
     new PutCommand({
       TableName: this.tableName,
       Item: normalizeForDynamo({
-        ...merged,
+        ...projected,
         pk: partition,
-        sk: String(merged['id']),
+        sk: String(projected['id']),
       }),
     }),
   )
@@ -70,5 +79,5 @@ export const updateVersion: UpdateVersion = async function updateVersion(
   if (args.returning === false) {
     return null as never
   }
-  return merged as never
+  return projected as never
 }

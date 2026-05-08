@@ -5,6 +5,7 @@ import { GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb'
 import type { DynamoAdapter } from './types.js'
 
 import { normalizeForDynamo } from './utilities/normalizeForDynamo.js'
+import { projectForGlobal } from './utilities/resolveSchema.js'
 import { stripInternalKeys } from './utilities/stripInternalKeys.js'
 
 /**
@@ -38,17 +39,18 @@ export const updateGlobal: UpdateGlobal = async function updateGlobal(
 
   const existing = stripInternalKeys(result.Item)
   const merged: Record<string, unknown> = { ...existing, ...data, id: slug }
+  const projected = projectForGlobal(this, slug, merged)
 
   await docClient.send(
     new PutCommand({
       TableName: this.tableName,
       Item: normalizeForDynamo({
-        ...merged,
+        ...projected,
         pk: partition,
         sk: slug,
       }),
     }),
   )
 
-  return returning === false ? (null as never) : (merged as never)
+  return returning === false ? (null as never) : (projected as never)
 }

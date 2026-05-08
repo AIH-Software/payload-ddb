@@ -7,6 +7,7 @@ import type { DynamoAdapter } from './types.js'
 
 import { findFirst } from './utilities/findFirst.js'
 import { normalizeForDynamo } from './utilities/normalizeForDynamo.js'
+import { projectVersionSnapshot } from './utilities/resolveSchema.js'
 
 /**
  * Like `createVersion` but for global singletons: there's no `parent`, and
@@ -39,9 +40,14 @@ export const createGlobalVersion: CreateGlobalVersion = async function createGlo
   })
 
   const id = randomUUID()
+  const sanitizedVersionData = projectVersionSnapshot(
+    this,
+    { kind: 'global', slug: globalSlug },
+    versionData as Record<string, unknown>,
+  )
   const item: Record<string, unknown> = {
     id,
-    version: versionData,
+    version: sanitizedVersionData,
     createdAt,
     updatedAt,
     latest: true,

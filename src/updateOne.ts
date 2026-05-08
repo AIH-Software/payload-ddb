@@ -6,6 +6,7 @@ import type { DynamoAdapter } from './types.js'
 
 import { findFirst } from './utilities/findFirst.js'
 import { normalizeForDynamo } from './utilities/normalizeForDynamo.js'
+import { projectForCollection } from './utilities/resolveSchema.js'
 import { stripInternalKeys } from './utilities/stripInternalKeys.js'
 
 /**
@@ -54,14 +55,18 @@ export const updateOne: UpdateOne = async function updateOne(this: DynamoAdapter
     // spread above and we only override here when `data` didn't supply one.
     updatedAt: args.data['updatedAt'] ?? new Date().toISOString(),
   }
+  // Strip the merged result against the collection schema. Catches both
+  // unknown keys in the incoming patch and any pre-existing leaked keys on
+  // the persisted target — every update doubles as incremental cleanup.
+  const projected = projectForCollection(this, args.collection, merged)
 
   await docClient.send(
     new PutCommand({
       TableName: this.tableName,
       Item: normalizeForDynamo({
-        ...merged,
+        ...projected,
         pk: partition,
-        sk: String(merged['id']),
+        sk: String(projected['id']),
       }),
     }),
   )
@@ -69,5 +74,5 @@ export const updateOne: UpdateOne = async function updateOne(this: DynamoAdapter
   if (args.returning === false) {
     return null as never
   }
-  return merged as never
+  return projected as never
 }

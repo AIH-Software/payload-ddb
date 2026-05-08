@@ -7,6 +7,7 @@ import type { DynamoAdapter } from './types.js'
 
 import { findFirst } from './utilities/findFirst.js'
 import { normalizeForDynamo } from './utilities/normalizeForDynamo.js'
+import { projectVersionSnapshot } from './utilities/resolveSchema.js'
 
 /**
  * Insert a new version for a collection's parent doc, maintaining the
@@ -50,10 +51,18 @@ export const createVersion: CreateVersion = async function createVersion(
   })
 
   const id = randomUUID()
+  // Project the snapshot against the parent collection's schema so that any
+  // unknown keys (e.g. registration-form `confirm-password`) don't ride into
+  // the version row alongside the legitimate doc state.
+  const sanitizedVersionData = projectVersionSnapshot(
+    this,
+    { kind: 'collection', slug: collectionSlug },
+    versionData as Record<string, unknown>,
+  )
   const item: Record<string, unknown> = {
     id,
     parent,
-    version: versionData,
+    version: sanitizedVersionData,
     createdAt,
     updatedAt,
     latest: true,

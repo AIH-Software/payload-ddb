@@ -32,6 +32,8 @@ import { updateVersion } from './updateVersion.js'
 import { upsert } from './upsert.js'
 
 export type { Args, DynamoAdapter } from './types.js'
+export { scrubUnknownFields } from './utilities/scrubUnknownFields.js'
+export type { ScrubReport } from './utilities/scrubUnknownFields.js'
 
 const NAME = 'dynamodb'
 const PACKAGE_NAME = '@aih-software/payload-ddb'

@@ -7,6 +7,7 @@ import type { DynamoAdapter } from './types.js'
 import { applySorts } from './utilities/applySorts.js'
 import { normalizeForDynamo } from './utilities/normalizeForDynamo.js'
 import { queryMatching } from './utilities/queryMatching.js'
+import { projectForCollection } from './utilities/resolveSchema.js'
 
 /**
  * v1 strategy: query-and-collect matches, sort, slice to `limit`, then
@@ -45,17 +46,18 @@ export const updateMany: UpdateMany = async function updateMany(
         id: target['id'],
         updatedAt,
       }
+      const projected = projectForCollection(this, collection, merged)
       await docClient.send(
         new PutCommand({
           TableName: this.tableName,
           Item: normalizeForDynamo({
-            ...merged,
+            ...projected,
             pk: partition,
-            sk: String(merged['id']),
+            sk: String(projected['id']),
           }),
         }),
       )
-      return merged
+      return projected
     }),
   )
 

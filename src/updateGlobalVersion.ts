@@ -6,6 +6,7 @@ import type { DynamoAdapter } from './types.js'
 
 import { findFirst } from './utilities/findFirst.js'
 import { normalizeForDynamo } from './utilities/normalizeForDynamo.js'
+import { projectVersionRow } from './utilities/resolveSchema.js'
 import { stripInternalKeys } from './utilities/stripInternalKeys.js'
 
 /**
@@ -48,14 +49,19 @@ export const updateGlobalVersion: UpdateGlobalVersion = async function updateGlo
     ...args.versionData,
     id: target['id'],
   }
+  const projected = projectVersionRow(
+    this,
+    { kind: 'global', slug: args.global },
+    merged,
+  )
 
   await docClient.send(
     new PutCommand({
       TableName: this.tableName,
       Item: normalizeForDynamo({
-        ...merged,
+        ...projected,
         pk: partition,
-        sk: String(merged['id']),
+        sk: String(projected['id']),
       }),
     }),
   )
@@ -63,5 +69,5 @@ export const updateGlobalVersion: UpdateGlobalVersion = async function updateGlo
   if (args.returning === false) {
     return null as never
   }
-  return merged as never
+  return projected as never
 }
