@@ -1,5 +1,11 @@
 # @aih-software/payload-ddb
 
+## 3.1.0
+
+### Minor Changes
+
+- 69adcb3: Minor Bump for publish target
+
 ## 3.0.0
 
 ### Major Changes

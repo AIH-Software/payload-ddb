@@ -1,6 +1,6 @@
 {
   "name": "@aih-software/payload-ddb",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "An unofficial database provider for PayloadCMS, utilizing DynamoDb",
   "keywords": [
     "payloadcms",
