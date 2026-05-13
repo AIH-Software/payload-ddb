@@ -139,7 +139,7 @@ jobs:
         with:
           node-version: 22.x
           registry-url: 'https://registry.npmjs.org'
-          scope: '@aih-software'
+          scope: '@open-aih'
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -147,14 +147,15 @@ jobs:
       - name: Build
         run: pnpm build
 
-      - name: Retarget publishConfig at npmjs
-        # package.json's publishConfig points at GitHub Packages with
-        # restricted access; rewrite it in-place so `pnpm publish` lands
-        # on npmjs as a public package. The change is never committed.
+      - name: Retarget package for public @open-aih publish
+        # The repo source-of-truth is the private @aih-software scope on
+        # GitHub Packages. For the public mirror on npmjs we rewrite name
+        # and publishConfig in-place — the change is never committed.
         run: |
           node -e "
             const fs = require('fs');
             const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            pkg.name = '@open-aih/payload-ddb';
             pkg.publishConfig = { registry: 'https://registry.npmjs.org', access: 'public' };
             fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
           "
