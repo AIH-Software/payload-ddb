@@ -1,12 +1,12 @@
 import type { UpdateGlobal } from 'payload'
 
-import { GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb'
+import { GetCommand } from '@aws-sdk/lib-dynamodb'
 
 import type { DynamoAdapter } from './types.js'
 
-import { normalizeForDynamo } from './utilities/normalizeForDynamo.js'
 import { projectForGlobal } from './utilities/resolveSchema.js'
 import { stripInternalKeys } from './utilities/stripInternalKeys.js'
+import { putItem } from './utilities/writeItems.js'
 
 /**
  * Read-merge-write for the global's singleton row. Per Payload's contract,
@@ -41,16 +41,7 @@ export const updateGlobal: UpdateGlobal = async function updateGlobal(
   const merged: Record<string, unknown> = { ...existing, ...data, id: slug }
   const projected = projectForGlobal(this, slug, merged)
 
-  await docClient.send(
-    new PutCommand({
-      TableName: this.tableName,
-      Item: normalizeForDynamo({
-        ...projected,
-        pk: partition,
-        sk: slug,
-      }),
-    }),
-  )
+  await putItem(this, partition, projected)
 
   return returning === false ? (null as never) : (projected as never)
 }

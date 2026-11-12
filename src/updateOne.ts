@@ -1,13 +1,13 @@
 import type { UpdateOne } from 'payload'
 
-import { GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb'
+import { GetCommand } from '@aws-sdk/lib-dynamodb'
 
 import type { DynamoAdapter } from './types.js'
 
 import { findFirst } from './utilities/findFirst.js'
-import { normalizeForDynamo } from './utilities/normalizeForDynamo.js'
 import { projectForCollection } from './utilities/resolveSchema.js'
 import { stripInternalKeys } from './utilities/stripInternalKeys.js'
+import { putItem } from './utilities/writeItems.js'
 
 /**
  * v1 strategy: read-merge-write rather than building an `UpdateExpression`.
@@ -60,16 +60,7 @@ export const updateOne: UpdateOne = async function updateOne(this: DynamoAdapter
   // the persisted target — every update doubles as incremental cleanup.
   const projected = projectForCollection(this, args.collection, merged)
 
-  await docClient.send(
-    new PutCommand({
-      TableName: this.tableName,
-      Item: normalizeForDynamo({
-        ...projected,
-        pk: partition,
-        sk: String(projected['id']),
-      }),
-    }),
-  )
+  await putItem(this, partition, projected)
 
   if (args.returning === false) {
     return null as never
