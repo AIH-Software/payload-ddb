@@ -1,22 +1,16 @@
 import type { Create } from 'payload'
 
-import { PutCommand } from '@aws-sdk/lib-dynamodb'
 import { randomUUID } from 'node:crypto'
 
 import type { DynamoAdapter } from './types.js'
 
-import { normalizeForDynamo } from './utilities/normalizeForDynamo.js'
 import { projectForCollection } from './utilities/resolveSchema.js'
+import { putItem } from './utilities/writeItems.js'
 
 export const create: Create = async function create(
   this: DynamoAdapter,
   { collection, customID, data, returning },
 ) {
-  const docClient = this.docClient
-  if (!docClient) {
-    throw new Error('payload-ddb: docClient is not initialized — call connect() first.')
-  }
-
   const id = customID ?? data['id'] ?? randomUUID()
   const now = new Date().toISOString()
   // Spread `data` first, then nullish-coalesce timestamps. Explicit values
@@ -35,16 +29,7 @@ export const create: Create = async function create(
   // registration form's `confirm-password`) would persist verbatim.
   const projected = projectForCollection(this, collection, item)
 
-  await docClient.send(
-    new PutCommand({
-      TableName: this.tableName,
-      Item: normalizeForDynamo({
-        ...projected,
-        pk: this.resolvePartition(collection),
-        sk: String(id),
-      }),
-    }),
-  )
+  await putItem(this, this.resolvePartition(collection), projected)
 
   return returning === false ? (null as never) : projected
 }

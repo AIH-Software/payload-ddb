@@ -1,13 +1,13 @@
 import type { UpdateVersion } from 'payload'
 
-import { GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb'
+import { GetCommand } from '@aws-sdk/lib-dynamodb'
 
 import type { DynamoAdapter } from './types.js'
 
 import { findFirst } from './utilities/findFirst.js'
-import { normalizeForDynamo } from './utilities/normalizeForDynamo.js'
 import { projectVersionRow } from './utilities/resolveSchema.js'
 import { stripInternalKeys } from './utilities/stripInternalKeys.js'
+import { putItem } from './utilities/writeItems.js'
 
 /**
  * Read-merge-write against the versions partition. `versionData` is
@@ -65,16 +65,7 @@ export const updateVersion: UpdateVersion = async function updateVersion(
     merged,
   )
 
-  await docClient.send(
-    new PutCommand({
-      TableName: this.tableName,
-      Item: normalizeForDynamo({
-        ...projected,
-        pk: partition,
-        sk: String(projected['id']),
-      }),
-    }),
-  )
+  await putItem(this, partition, projected)
 
   if (args.returning === false) {
     return null as never

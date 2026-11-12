@@ -1,10 +1,9 @@
 import type { DeleteVersions } from 'payload'
 
-import { DeleteCommand } from '@aws-sdk/lib-dynamodb'
-
 import type { DynamoAdapter } from './types.js'
 
 import { queryMatching } from './utilities/queryMatching.js'
+import { deleteItems } from './utilities/writeItems.js'
 
 /**
  * Same query + parallel delete pattern as `deleteMany`, but routes to the
@@ -16,11 +15,6 @@ export const deleteVersions: DeleteVersions = async function deleteVersions(
   this: DynamoAdapter,
   { collection, globalSlug, where },
 ) {
-  const docClient = this.docClient
-  if (!docClient) {
-    throw new Error('payload-ddb: docClient is not initialized — call connect() first.')
-  }
-
   const slug = collection ?? globalSlug
   if (!slug) {
     throw new Error('payload-ddb: deleteVersions requires either `collection` or `globalSlug`.')
@@ -29,14 +23,9 @@ export const deleteVersions: DeleteVersions = async function deleteVersions(
   const partition = this.resolveVersionsPartition(slug)
   const matched = await queryMatching(this, partition, where)
 
-  await Promise.all(
-    matched.map((target) =>
-      docClient.send(
-        new DeleteCommand({
-          TableName: this.tableName,
-          Key: { pk: partition, sk: String(target['id']) },
-        }),
-      ),
-    ),
+  await deleteItems(
+    this,
+    partition,
+    matched.map((target) => target['id']),
   )
 }

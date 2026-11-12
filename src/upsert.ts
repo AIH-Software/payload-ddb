@@ -1,13 +1,12 @@
 import type { Upsert } from 'payload'
 
-import { PutCommand } from '@aws-sdk/lib-dynamodb'
 import { randomUUID } from 'node:crypto'
 
 import type { DynamoAdapter } from './types.js'
 
 import { findFirst } from './utilities/findFirst.js'
-import { normalizeForDynamo } from './utilities/normalizeForDynamo.js'
 import { projectForCollection } from './utilities/resolveSchema.js'
+import { putItem } from './utilities/writeItems.js'
 
 /**
  * Locate by `where`; merge-and-put if found, put-with-fresh-id otherwise.
@@ -20,11 +19,6 @@ export const upsert: Upsert = async function upsert(
   this: DynamoAdapter,
   { collection, data, returning, where },
 ) {
-  const docClient = this.docClient
-  if (!docClient) {
-    throw new Error('payload-ddb: docClient is not initialized — call connect() first.')
-  }
-
   const partition = this.resolvePartition(collection)
   const found = await findFirst(this, { partition, where })
 
@@ -52,16 +46,7 @@ export const upsert: Upsert = async function upsert(
 
   const projected = projectForCollection(this, collection, item)
 
-  await docClient.send(
-    new PutCommand({
-      TableName: this.tableName,
-      Item: normalizeForDynamo({
-        ...projected,
-        pk: partition,
-        sk: String(projected['id']),
-      }),
-    }),
-  )
+  await putItem(this, partition, projected)
 
   return returning === false ? (null as never) : (projected as never)
 }
