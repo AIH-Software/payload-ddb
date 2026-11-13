@@ -3,7 +3,11 @@ run-name: Release on push to ${{ github.ref_name }}
 
 on:
   push:
-    branches: [main]
+    # `main` cuts a release. `beta` cuts a prerelease of whatever is pushed
+    # there: a snapshot version (`X.Y.Z-beta.<timestamp>`) published under
+    # the `beta` dist-tag. Nothing is committed, tagged or merged for it, so
+    # the branch can be thrown away afterwards.
+    branches: [main, beta]
 
 # Cancel-in-progress is off: a release run that's already publishing must not
 # be killed by the next push, or we'd leave half-applied tags/versions behind.
@@ -22,6 +26,7 @@ jobs:
       should-release: ${{ steps.gate.outputs.should-release }}
       bump: ${{ steps.gate.outputs.bump }}
       version: ${{ steps.version.outputs.version }}
+      prerelease: ${{ steps.channel.outputs.prerelease }}
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -30,6 +35,18 @@ jobs:
           # base branch and produce a stable release set.
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pick release channel
+        id: channel
+        run: |
+          if [ "${{ github.ref_name }}" = "main" ]; then
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+            # `changeset status` measures against a local `main`, which a
+            # checkout of another branch doesn't have.
+            git branch --force main origin/main
+          fi
 
       - name: Enable Corepack
         run: corepack enable
@@ -68,7 +85,14 @@ jobs:
 
       - name: Apply version bumps
         if: steps.gate.outputs.should-release == 'true'
-        run: pnpm changeset version
+        run: |
+          if [ "${{ steps.channel.outputs.prerelease }}" = "true" ]; then
+            # Same version the release would get, plus `-beta.<timestamp>`
+            # (see `snapshot` in .changeset/config.json).
+            pnpm changeset version --snapshot beta
+          else
+            pnpm changeset version
+          fi
 
       - name: Build
         if: steps.gate.outputs.should-release == 'true'
@@ -80,7 +104,9 @@ jobs:
         run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
 
       - name: Commit, tag, push
-        if: steps.gate.outputs.should-release == 'true'
+        # A prerelease leaves no trace in git: its version exists only in the
+        # published package.
+        if: steps.gate.outputs.should-release == 'true' && steps.channel.outputs.prerelease != 'true'
         run: |
           version=${{ steps.version.outputs.version }}
           git config user.name 'github-actions[bot]'
@@ -94,12 +120,14 @@ jobs:
 
       - name: Publish to GitHub Packages
         if: steps.gate.outputs.should-release == 'true'
-        run: pnpm publish --no-git-checks
+        # A prerelease must not become `latest`; npm also refuses to publish
+        # a prerelease version without an explicit tag.
+        run: pnpm publish --no-git-checks ${{ steps.channel.outputs.prerelease == 'true' && '--tag beta' || '' }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Create GitHub Release
-        if: steps.gate.outputs.should-release == 'true'
+        if: steps.gate.outputs.should-release == 'true' && steps.channel.outputs.prerelease != 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -135,7 +163,8 @@ jobs:
       - name: Checkout at release tag
         uses: actions/checkout@v7
         with:
-          ref: v${{ needs.release.outputs.version }}
+          # A prerelease has no tag; it is built from the pushed commit.
+          ref: ${{ needs.release.outputs.prerelease == 'true' && github.sha || format('v{0}', needs.release.outputs.version) }}
 
       - name: Enable Corepack
         run: corepack enable
@@ -157,11 +186,16 @@ jobs:
         # The repo source-of-truth is the private @aih-software scope on
         # GitHub Packages. For the public mirror on npmjs we rewrite name
         # and publishConfig in-place — the change is never committed.
+        # The version is set here too: a prerelease's version was never
+        # committed, so the checkout doesn't carry it.
+        env:
+          VERSION: ${{ needs.release.outputs.version }}
         run: |
           node -e "
             const fs = require('fs');
             const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
             pkg.name = '@open-aih/payload-ddb';
+            pkg.version = process.env.VERSION;
             pkg.publishConfig = { registry: 'https://registry.npmjs.org', access: 'public' };
             fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
           "
@@ -177,4 +211,4 @@ jobs:
         # package.json to keep pointing at this repository.
         run: |
           echo "node $(node --version), npm $(npm --version)"
-          npm publish --access public
+          npm publish --access public ${{ needs.release.outputs.prerelease == 'true' && '--tag beta' || '' }}

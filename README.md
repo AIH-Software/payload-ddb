@@ -365,6 +365,12 @@ The public publish uses npm
 no npm token to rotate. The trusted publisher configured on npmjs.com must
 name this repository and the workflow file `release.yml`.
 
+**Prereleases.** To try a change in a real project before releasing it, push
+the commit to the `beta` branch (`git push origin HEAD:beta --force`). The
+same workflow publishes it to both registries as `X.Y.Z-beta.<timestamp>`
+under the `beta` dist-tag — install it with `@open-aih/payload-ddb@beta` —
+and commits, tags and merges nothing. `latest` is untouched.
+
 ## License
 
 MIT
