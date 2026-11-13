@@ -30,7 +30,10 @@ import { encodeValue } from './uniqueGuards.js'
  *  - `equals / in` on an indexed field — the index rows under each value
  *    name the documents (`fieldIndexes`);
  *  - `greater_than(_equal) / less_than(_equal)` on an indexed field — index
- *    rows are in value order, so the range is one stretch of them.
+ *    rows are in value order, so the range is one stretch of them;
+ *  - an `or` whose every branch has such a clause — the candidates are the
+ *    union of the branches'. This is how Payload looks an upload up by
+ *    filename: `filename` or any of the image sizes' filenames.
  *
  * The clause only produces *candidate* ids. The rows are then read by key
  * and the full `where` is evaluated on each with `matchesWhere`, so the
@@ -54,15 +57,21 @@ export const INDEX_LOOKUP_LIMIT = 256
 
 /** An `in` list on an index-row field costs one `Query` per value. */
 const MAX_PREFIX_QUERIES = 100
+/** Each branch of an `or` costs at least one round trip of its own. */
+const MAX_OR_BRANCHES = 25
 const QUERY_CONCURRENCY = 10
 
 type Row = Record<string, unknown>
 type Key = number | string
 type Bound = { inclusive: boolean; value: Key }
-type Clause =
+type FieldClause =
   | { kind: 'keys'; equals: boolean; path: string; values: Key[] }
   | { kind: 'range'; lower?: Bound; path: string; upper?: Bound }
-type Plan = { clause: Clause; index: FieldIndex | null; rank: number }
+/** `any`: an `or` — a row has to satisfy at least one of the branches. */
+type Clause = FieldClause | { branches: Where[]; kind: 'any' }
+type Plan =
+  | { clause: Extract<Clause, { kind: 'any' }>; rank: number }
+  | { clause: FieldClause; index: FieldIndex | null; rank: number }
 
 /** A filter operand as the stored value it is compared against. */
 function asKey(value: unknown): Key | null {
@@ -96,14 +105,20 @@ function rangeOf(operators: Record<string, unknown>): null | { lower?: Bound; up
   return { ...(lower ? { lower } : {}), ...(upper ? { upper } : {}) }
 }
 
-/** Collect the key and range clauses every matching row must satisfy. */
+/** Collect the clauses every matching row must satisfy. */
 function keyClauses(where: Where, out: Clause[]): void {
   for (const [key, raw] of Object.entries(where)) {
     if (key === 'and' || key === 'or') {
       if (!Array.isArray(raw)) continue
-      // Every branch of an `and` constrains the result; an `or` only does
-      // when it has a single branch.
-      if (key === 'or' && raw.length !== 1) continue
+      // Every branch of an `and` constrains the result, and so does the one
+      // branch of a single-branch `or`. A real `or` constrains it as a
+      // whole: each row matches some branch.
+      if (key === 'or' && raw.length > 1) {
+        if (raw.every((sub) => sub && typeof sub === 'object')) {
+          out.push({ branches: raw, kind: 'any' })
+        }
+        continue
+      }
       for (const sub of raw) {
         if (sub && typeof sub === 'object') keyClauses(sub, out)
       }
@@ -126,12 +141,15 @@ function keyClauses(where: Where, out: Clause[]): void {
 }
 
 /** Cheapest first: fewer round trips, then fewer candidates. */
-function rank(clause: Clause, index: FieldIndex | null): number {
+function rank(clause: FieldClause, index: FieldIndex | null): number {
   if (clause.kind === 'range') return 6
   if (!index) return clause.equals ? 0 : 2
   if (index.kind === 'unique') return clause.equals ? 1 : 4
   return clause.equals ? 3 : 5
 }
+
+/** An `or` is several lookups: after any single one, before a range walk. */
+const OR_RANK = 5.5
 
 export async function findByIndex(
   adapter: DynamoAdapter,
@@ -140,6 +158,30 @@ export async function findByIndex(
 ): Promise<null | Row[]> {
   if (!where) return null
 
+  const ids = await candidatesOf(adapter, partition, where)
+  if (ids === null) return null
+
+  const items = await batchGet(
+    adapter,
+    ids.map((id) => ({ pk: partition, sk: id })),
+  )
+  const rows = items.map(stripInternalKeys).filter((row) => matchesWhere(row, where))
+  // A partition read returns rows in key order; keep that, so callers that
+  // take "the first match" get the same one either way.
+  return rows.sort((a, b) => compareKeys(String(a['id']), String(b['id'])))
+}
+
+const compareKeys = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0)
+
+/**
+ * The sort keys of every row `where` can match — possibly more, never
+ * fewer — or `null` when none of its clauses can supply them.
+ */
+async function candidatesOf(
+  adapter: DynamoAdapter,
+  partition: string,
+  where: Where,
+): Promise<null | string[]> {
   const clauses: Clause[] = []
   keyClauses(where, clauses)
   if (clauses.length === 0) return null
@@ -147,6 +189,10 @@ export async function findByIndex(
   const indexes = indexesOf(adapter, partition)
   const plans: Plan[] = []
   for (const clause of clauses) {
+    if (clause.kind === 'any') {
+      plans.push({ clause, rank: OR_RANK })
+      continue
+    }
     const index = clause.path === 'id' ? null : indexes?.get(clause.path)
     if (index === undefined) continue
     // Ranges need rows in value order: not ids (random), not guards.
@@ -157,28 +203,47 @@ export async function findByIndex(
   plans.sort((a, b) => a.rank - b.rank || size(a.clause) - size(b.clause))
 
   for (const plan of plans) {
-    const ids = await candidateIds(adapter, plan)
-    if (ids === null) continue
-
-    const items = await batchGet(
-      adapter,
-      ids.map((id) => ({ pk: partition, sk: id })),
-    )
-    const rows = items.map(stripInternalKeys).filter((row) => matchesWhere(row, where))
-    // A partition read returns rows in key order; keep that, so callers that
-    // take "the first match" get the same one either way.
-    return rows.sort((a, b) => compareKeys(String(a['id']), String(b['id'])))
+    const ids =
+      'index' in plan
+        ? await candidateIds(adapter, plan.clause, plan.index)
+        : await unionOf(adapter, partition, plan.clause.branches)
+    if (ids !== null) return ids
   }
-
   return null
 }
 
-const compareKeys = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0)
+/**
+ * Candidates for an `or`: the union of its branches' candidates. Every
+ * branch has to supply some — one that can't could match any row at all —
+ * and together they have to stay within what a key lookup is worth.
+ */
+async function unionOf(
+  adapter: DynamoAdapter,
+  partition: string,
+  branches: Where[],
+): Promise<null | string[]> {
+  if (branches.length > MAX_OR_BRANCHES) return null
 
-/** The sort keys of the rows a plan's clause can match, or `null` to pass. */
-async function candidateIds(adapter: DynamoAdapter, plan: Plan): Promise<null | string[]> {
-  const { clause, index } = plan
+  const found = new Set<string>()
+  let open = false
+  await mapWithConcurrency(branches, QUERY_CONCURRENCY, async (branch) => {
+    if (open) return
+    const ids = await candidatesOf(adapter, partition, branch)
+    if (ids === null) {
+      open = true
+      return
+    }
+    for (const id of ids) found.add(id)
+  })
+  return open || found.size > INDEX_LOOKUP_LIMIT ? null : [...found]
+}
 
+/** The sort keys of the rows a field clause can match, or `null` to pass. */
+async function candidateIds(
+  adapter: DynamoAdapter,
+  clause: FieldClause,
+  index: FieldIndex | null,
+): Promise<null | string[]> {
   if (clause.kind === 'range') {
     if (!index || !(await isIndexReady(adapter, index))) return null
     const [from, to] = rangeSpan(clause)
@@ -222,7 +287,7 @@ async function candidateIds(adapter: DynamoAdapter, plan: Plan): Promise<null | 
  * A bound whose key was cut short stands for many values, so it is always
  * taken inclusively; the re-check sorts out the rest.
  */
-function rangeSpan(clause: Extract<Clause, { kind: 'range' }>): [string, string] {
+function rangeSpan(clause: Extract<FieldClause, { kind: 'range' }>): [string, string] {
   const sample = (clause.lower ?? clause.upper)!.value
   const tag = typeof sample === 'number' ? 'n' : 's'
 

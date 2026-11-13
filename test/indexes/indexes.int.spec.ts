@@ -224,6 +224,51 @@ describe('lookups that skip the partition read', () => {
     ).toEqual({ reads: 0, titles: [] })
   })
 
+  it('by an `or`, when every branch is an indexed lookup', async () => {
+    expect(await lookup({ or: [{ slug: { equals: 'one' } }, { sku: { equals: 'B' } }] })).toEqual({
+      reads: 0,
+      titles: ['one', 'three'],
+    })
+    // A branch may carry more than its key clause, and branches may nest.
+    expect(
+      await lookup({
+        or: [
+          { and: [{ sku: { equals: 'A' } }, { title: { equals: 'two' } }] },
+          { or: [{ slug: { equals: 'three' } }, { 'meta.code': { equals: 'm1' } }] },
+        ],
+      }),
+    ).toEqual({ reads: 0, titles: ['one', 'three', 'two'] })
+  })
+
+  it('by the `or` Payload uses to find an upload under any of its filenames', async () => {
+    // The shape of Payload's `checkFileAccess`: one value tried against a
+    // unique field and several indexed ones, with more constraints AND-ed on.
+    const where = (value: string) => ({
+      and: [
+        {
+          or: [
+            { slug: { equals: value } },
+            { sku: { equals: value } },
+            { 'meta.code': { equals: value } },
+          ],
+        },
+        { title: { exists: true } },
+      ],
+    })
+
+    const found = await traced(adapter, () =>
+      adapter.findOne({ collection: 'articles', where: where('m2') } as never),
+    )
+    expect((found.result as unknown as { title: string }).title).toBe('two')
+    expect(found.partitionReads('articles')).toBe(0)
+
+    const missing = await traced(adapter, () =>
+      adapter.findOne({ collection: 'articles', where: where('nope') } as never),
+    )
+    expect(missing.result).toBeNull()
+    expect(missing.partitionReads('articles')).toBe(0)
+  })
+
   it('when counting', async () => {
     const { partitionReads, result } = await traced(adapter, () =>
       payload.count({ collection: 'articles', where: { sku: { equals: 'A' } } }),

@@ -178,11 +178,14 @@ that and read only the matching documents:
 | `equals` / `in` on an `index: true` field | index rows |
 | `greater_than(_equal)` / `less_than(_equal)` on an `index: true` field | index rows, which are kept in value order |
 
-The clause has to hold for every result: at the top level or inside `and`,
-not on one side of an `or`. The rest of the `where` is then evaluated on the
-documents it selects. This covers login by `email`, pages by `slug`,
-relationship population (`id in [...]`), filters on a relationship, join
-fields, and date or number ranges.
+The clause has to hold for every result: at the top level or inside `and`.
+An `or` qualifies as a whole when every one of its branches has such a
+clause — the branches are looked up separately and combined — but not when
+one branch would need the partition anyway. The rest of the `where` is then
+evaluated on the documents selected. This covers login by `email`, pages by
+`slug`, relationship population (`id in [...]`), filters on a relationship,
+join fields, date or number ranges, and Payload's lookup of an upload by any
+of its filenames.
 
 - **Which fields.** `index: true` on a `text`, `email`, `number`, `date`,
   `relationship` or `upload` field — including `hasMany` fields (one row per

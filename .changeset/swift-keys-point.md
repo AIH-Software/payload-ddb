@@ -15,6 +15,9 @@ Lookups
   `upload`, including `hasMany`, grouped and localized fields) are answered
   from new index rows, which are kept in value order. Join fields use them
   too.
+- An `or` is answered from indexes too when every branch has one of the
+  clauses above. That is the query Payload runs to find an upload under its
+  filename or any image size's filename.
 - A `find` sorted by one single-valued indexed field reads its page by
   walking that index in order instead of reading and sorting the collection.
 
