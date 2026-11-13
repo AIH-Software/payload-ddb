@@ -3,7 +3,7 @@ import type { Where } from 'payload'
 import type { DynamoAdapter } from '../types.js'
 
 import { matchesWhere } from './matchesWhere.js'
-import { queryMatching } from './queryMatching.js'
+import { latestVersionRows } from './versionIndex.js'
 
 /**
  * Returns true when the named collection has `versions.drafts` enabled in
@@ -41,11 +41,10 @@ export async function fetchDraftsOnlySupplements(
   where: undefined | Where,
 ): Promise<Record<string, unknown>[]> {
   const versionsPartition = adapter.resolveVersionsPartition(collectionSlug)
-  const latestRows = await queryMatching(adapter, versionsPartition, {
-    latest: { equals: true },
-  })
-
   const seen = new Set<unknown>(mainRows.map((row) => row['id']))
+  // Only the latest versions of documents not already in hand are fetched.
+  const latestRows = await latestVersionRows(adapter, versionsPartition, seen)
+
   const supplements: Record<string, unknown>[] = []
   for (const row of latestRows) {
     if (seen.has(row['parent'])) continue

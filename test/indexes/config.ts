@@ -31,6 +31,22 @@ export const makeConfig = (): Partial<Config> => ({
       ],
     },
     {
+      // Number, date and text values to filter by range and sort by.
+      slug: 'events',
+      fields: [
+        { name: 'name', type: 'text' },
+        { name: 'score', type: 'number', index: true },
+        { name: 'at', type: 'date', index: true },
+        { name: 'city', type: 'text', index: true },
+      ],
+    },
+    {
+      // Versioned, so every save writes a version row.
+      slug: 'drafts',
+      fields: [{ name: 'title', type: 'text' }],
+      versions: { drafts: true },
+    },
+    {
       // Stands in for a collection that held documents before indexes existed.
       slug: 'legacy',
       fields: [
@@ -38,6 +54,9 @@ export const makeConfig = (): Partial<Config> => ({
         { name: 'email', type: 'text', unique: true },
       ],
     },
+  ],
+  globals: [
+    { slug: 'settings', fields: [{ name: 'title', type: 'text' }], versions: { drafts: true } },
   ],
   localization: { defaultLocale: 'en', locales: ['en', 'es'] },
 })

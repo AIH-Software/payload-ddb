@@ -33,5 +33,7 @@ export const deleteVersions: DeleteVersions = async function deleteVersions(
     ),
   )
 
-  await deleteItems(this, partition, matched)
+  // Each version's index row, and its parent's pointer if it was the latest,
+  // go with it.
+  await deleteItems(this, partition, matched, { versions: true })
 }

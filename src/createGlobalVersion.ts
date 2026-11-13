@@ -4,9 +4,10 @@ import { randomUUID } from 'node:crypto'
 
 import type { DynamoAdapter } from './types.js'
 
-import { findFirst } from './utilities/findFirst.js'
+import { backoff, conflictError, MAX_WRITE_ATTEMPTS } from './utilities/optimistic.js'
 import { projectVersionSnapshot } from './utilities/resolveSchema.js'
-import { putVersionAsLatest } from './utilities/writeItems.js'
+import { findLatestVersion } from './utilities/versionIndex.js'
+import { isConditionalCheckFailed, putVersionAsLatest } from './utilities/writeItems.js'
 
 /**
  * Like `createVersion` but for global singletons: there's no `parent`, and
@@ -28,11 +29,6 @@ export const createGlobalVersion: CreateGlobalVersion = async function createGlo
 ) {
   const partition = this.resolveVersionsPartition(globalSlug)
 
-  const previousLatest = await findFirst(this, {
-    partition,
-    where: { latest: { equals: true } },
-  })
-
   const id = randomUUID()
   const sanitizedVersionData = projectVersionSnapshot(
     this,
@@ -50,7 +46,18 @@ export const createGlobalVersion: CreateGlobalVersion = async function createGlo
     ...(publishedLocale !== undefined ? { publishedLocale } : {}),
   }
 
-  await putVersionAsLatest(this, partition, item, previousLatest)
+  for (let attempt = 1; ; attempt++) {
+    // A global has one stream of versions, so one pointer and no parent.
+    const { pointer, previous } = await findLatestVersion(this, partition, undefined)
+    try {
+      await putVersionAsLatest(this, partition, item, previous, pointer)
+      break
+    } catch (err) {
+      if (!isConditionalCheckFailed(err)) throw err
+      if (attempt >= MAX_WRITE_ATTEMPTS) throw conflictError()
+      await backoff(attempt)
+    }
+  }
 
   return returning === false ? (null as never) : (item as never)
 }

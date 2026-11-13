@@ -2,7 +2,7 @@ import { DeleteCommand, PutCommand, QueryCommand } from '@aws-sdk/lib-dynamodb'
 
 import type { DynamoAdapter } from '../types.js'
 
-import { collectionPartitionOf, type FieldIndex, indexedCollections } from './fieldIndexes.js'
+import { type FieldIndex, indexedPartitions, ownerPartitionOf } from './fieldIndexes.js'
 
 /**
  * Which indexes are *complete* — safe to answer lookups from.
@@ -116,7 +116,7 @@ async function writeMarkers(adapter: DynamoAdapter, partitions: string[]): Promi
 async function load(adapter: DynamoAdapter): Promise<State> {
   const docClient = requireDocClient(adapter)
   const ready = await readMarkers(adapter)
-  const collections = indexedCollections(adapter)
+  const collections = indexedPartitions(adapter)
 
   // Markers for fields of our collections that are no longer indexed:
   // nothing keeps those indexes up to date any more, so they must not
@@ -125,7 +125,7 @@ async function load(adapter: DynamoAdapter): Promise<State> {
     collections.flatMap(({ indexes }) => indexes.map((index) => index.partition)),
   )
   const stale = [...ready].filter(
-    (partition) => !configured.has(partition) && collectionPartitionOf(adapter, partition) !== null,
+    (partition) => !configured.has(partition) && ownerPartitionOf(adapter, partition) !== null,
   )
   await Promise.all(
     stale.map((partition) =>
@@ -139,9 +139,10 @@ async function load(adapter: DynamoAdapter): Promise<State> {
   )
   for (const partition of stale) ready.delete(partition)
 
-  for (const { indexes, partition, slug } of collections) {
+  for (const { indexes, kind, partition, slug } of collections) {
     const missing = indexes.filter((index) => !ready.has(index.partition))
     if (missing.length === 0) continue
+    const label = kind === 'versions' ? `${slug} (versions)` : slug
 
     if (await isEmpty(adapter, partition)) {
       const partitions = missing.map((index) => index.partition)
@@ -155,12 +156,12 @@ async function load(adapter: DynamoAdapter): Promise<State> {
       told = new Set()
       announced.set(adapter, told)
     }
-    if (!told.has(slug)) {
-      told.add(slug)
+    if (!told.has(label)) {
+      told.add(label)
       adapter.payload.logger.info(
-        `payload-ddb: ${missing.length} index(es) on "${slug}" (${missing
+        `payload-ddb: ${missing.length} index(es) on "${label}" (${missing
           .map((index) => index.path)
-          .join(', ')}) aren't built for its existing documents, so lookups on them read the ` +
+          .join(', ')}) aren't built for its existing rows, so lookups on them read the ` +
           'whole partition. Run `backfillIndexes(payload)` once to build them.',
       )
     }

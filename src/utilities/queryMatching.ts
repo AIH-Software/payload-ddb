@@ -30,13 +30,15 @@ export async function queryMatching(
   adapter: DynamoAdapter,
   partition: string,
   where: undefined | Where,
+  /** `skipIndex`: the caller already tried `findByIndex` and it passed. */
+  options: { skipIndex?: boolean } = {},
 ): Promise<Record<string, unknown>[]> {
   const compiled = buildFilterExpression(where)
   // Always-false predicate (e.g. `id: { in: [] }` from access control).
   // Short-circuit so we don't pay for a Query just to return nothing.
   if (compiled.never) return []
 
-  const viaIndex = await findByIndex(adapter, partition, where)
+  const viaIndex = options.skipIndex ? null : await findByIndex(adapter, partition, where)
   if (viaIndex) return viaIndex
 
   const matched: Record<string, unknown>[] = []

@@ -3,6 +3,7 @@ import { buildConfig, getPayload, type Payload } from 'payload'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 
 import { type Args, backfillIndexes, dynamoAdapter, type DynamoAdapter } from '../../src/index.js'
+import { valueKey } from '../../src/utilities/fieldIndexes.js'
 import { INDEX_LOOKUP_LIMIT } from '../../src/utilities/indexLookup.js'
 import { mapWithConcurrency } from '../../src/utilities/mapWithConcurrency.js'
 import { TEST_DDB_ENDPOINT } from '../__helpers/assertDbReachable.js'
@@ -86,13 +87,16 @@ async function traced<T>(db: DynamoAdapter, run: () => Promise<T>) {
     return {
       result,
       sent,
-      /** How many `Query`s walked `partition` itself (not a key prefix of it). */
-      partitionReads: (partition: string) =>
+      /**
+       * How many `Query`s walked `partition` itself. A `COUNT` walk, which
+       * sends no rows back, only counts when `counts` is set.
+       */
+      partitionReads: (partition: string, counts = true) =>
         sent.filter(
           ({ name, input }) =>
             name === 'QueryCommand' &&
             input['ExpressionAttributeValues']?.[':pk'] === partition &&
-            !(':prefix' in input['ExpressionAttributeValues']),
+            (counts || input['Select'] !== 'COUNT'),
         ).length,
     }
   } finally {
@@ -139,7 +143,7 @@ async function boot(key: string, tableName: string, args: Partial<Args> = {}): P
     }),
     secret: 'TEST_SECRET',
     telemetry: false,
-    typescript: { declare: false },
+    typescript: { autoGenerate: false, declare: false },
   })
   const instance = await getPayload({ config: sanitized, key })
   closers.push(() => instance.destroy())
@@ -275,7 +279,7 @@ describe('lookups that still read the partition', () => {
 describe('index rows follow the document', () => {
   const skuRows = async (value: string) =>
     (await rawPartition('articles#index#sku')).filter((row) =>
-      String(row['sk']).startsWith(`s:${value}#`),
+      String(row['sk']).startsWith(`${valueKey(value)}#`),
     )
 
   it('moves them on update and removes them on delete', async () => {
@@ -297,8 +301,9 @@ describe('index rows follow the document', () => {
     )
     const writes = sent.filter(({ name }) => name === 'TransactWriteCommand')
     expect(writes).toHaveLength(1)
-    // …the document, its slug guard and the one new `rank` row — no `sku` row.
-    expect(writes[0]!.input['TransactItems']).toHaveLength(3)
+    // …the document, its slug guard, and `rank` moving from its "no value"
+    // row to the new one — the `sku` row isn't touched.
+    expect(writes[0]!.input['TransactItems']).toHaveLength(4)
 
     await payload.delete({ id: doc.id, collection: 'articles' })
     expect(await lookup({ sku: { equals: 'after' } })).toEqual({ reads: 0, titles: [] })
@@ -310,7 +315,11 @@ describe('index rows follow the document', () => {
     await adapter.docClient!.send(
       new PutCommand({
         TableName: handle.tableName,
-        Item: { pk: 'articles#index#sku', sk: `s:B#${ids['one']}`, owner: String(ids['one']) },
+        Item: {
+          pk: 'articles#index#sku',
+          sk: `${valueKey('B')}#${ids['one']}`,
+          owner: String(ids['one']),
+        },
       }),
     )
     expect(await lookup({ sku: { equals: 'B' } })).toEqual({ reads: 0, titles: ['three'] })
@@ -322,12 +331,21 @@ describe('index rows follow the document', () => {
       collection: 'articles',
       data: { slug: 'wide', tags: many, title: 'wide' },
     } as never)
+    const tagRows = async () =>
+      (await rawPartition('articles#index#tags')).filter((row) => row['owner'] === String(doc.id))
     expect(await lookup({ tags: { equals: 't0' } })).toEqual({ reads: 0, titles: ['wide'] })
     expect(await lookup({ tags: { equals: 't149' } })).toEqual({ reads: 0, titles: ['wide'] })
+    expect(await tagRows()).toHaveLength(150)
 
     await payload.update({ id: doc.id, collection: 'articles', data: { tags: ['only'] } } as never)
     expect(await lookup({ tags: { equals: 't149' } })).toEqual({ reads: 0, titles: [] })
     expect(await lookup({ tags: { equals: 'only' } })).toEqual({ reads: 0, titles: ['wide'] })
+    // The removals one transaction had no room for are cleaned up after it.
+    expect(await tagRows()).toHaveLength(1)
+
+    await payload.update({ id: doc.id, collection: 'articles', data: { tags: many } } as never)
+    await payload.delete({ id: doc.id, collection: 'articles' })
+    expect(await tagRows()).toHaveLength(0)
   })
 
   it('agrees with the documents after concurrent updates and deletes', async () => {
@@ -382,6 +400,243 @@ describe('index rows follow the document', () => {
   })
 })
 
+describe('stray index rows', () => {
+  it('are removed by the backfill, which leaves real rows alone', async () => {
+    const stray = { pk: 'articles#index#sku', sk: `${valueKey('ghost')}#${ids['two']}` }
+    await adapter.docClient!.send(
+      new PutCommand({ TableName: handle.tableName, Item: { ...stray, owner: String(ids['two']) } }),
+    )
+
+    const report = await backfillIndexes(payload)
+    expect(report.collections['articles']!.pruned).toBeGreaterThanOrEqual(1)
+    expect((await rawPartition('articles#index#sku')).some((row) => row['sk'] === stray.sk)).toBe(
+      false,
+    )
+    expect(await lookup({ sku: { equals: 'A' } })).toEqual({ reads: 0, titles: ['one', 'two'] })
+    expect(await lookup({ sku: { equals: 'B' } })).toEqual({ reads: 0, titles: ['three'] })
+  })
+})
+
+describe('range filters and sorted pages', () => {
+  type Event = { at?: string; city?: string; id: string; name: string; score?: number }
+  let events: Event[] = []
+  const day = (n: number) => new Date(Date.UTC(2026, 0, n)).toISOString()
+  const names = (docs: unknown[]) => (docs as Event[]).map((doc) => doc.name)
+  const query = (args: Record<string, unknown>) =>
+    traced(adapter, () => payload.find({ collection: 'events', depth: 0, ...args } as never))
+
+  beforeAll(async () => {
+    const rows = [
+      { name: 'a', at: day(5), city: 'Oslo', score: 3 },
+      { name: 'b', at: day(1), city: 'Lima', score: -2 },
+      { name: 'c', at: day(9), city: 'Rome', score: 10 },
+      // Ties with `a` on score and with `b` on city.
+      { name: 'd', city: 'Lima', score: 3 },
+      { name: 'e', at: day(5), score: 0.5 },
+      { name: 'f', at: day(3), city: 'Oslo' },
+      { name: 'g', at: day(7), city: 'Bern', score: -11 },
+      // A city that is the start of another one.
+      { name: 'h', at: day(2), city: 'Rom', score: 3 },
+      { name: 'i' },
+      { name: 'j', at: day(8), city: 'Åre', score: 100 },
+      { name: 'k', at: day(6), city: 'Oslo', score: 2 },
+      { name: 'l', at: day(4), city: 'lima', score: 7 },
+    ]
+    for (const data of rows) await payload.create({ collection: 'events', data } as never)
+    events = (await payload.find({ collection: 'events', depth: 0, limit: 0 }))
+      .docs as unknown as Event[]
+  })
+
+  it('answers a range from the index', async () => {
+    const has = <K extends keyof Event>(key: K, test: (value: NonNullable<Event[K]>) => boolean) =>
+      (event: Event) => event[key] != null && test(event[key] as NonNullable<Event[K]>)
+    const cases: [Record<string, unknown>, (event: Event) => boolean][] = [
+      [{ score: { greater_than: 3 } }, has('score', (score) => score > 3)],
+      [{ score: { greater_than_equal: 3 } }, has('score', (score) => score >= 3)],
+      [{ score: { less_than: 0 } }, has('score', (score) => score < 0)],
+      [{ score: { less_than_equal: 0.5 } }, has('score', (score) => score <= 0.5)],
+      [
+        { score: { greater_than: -3, less_than_equal: 2 } },
+        has('score', (score) => score > -3 && score <= 2),
+      ],
+      [{ score: { greater_than: 5, less_than: 4 } }, () => false],
+      [{ at: { less_than: day(4) } }, has('at', (at) => at < day(4))],
+      [
+        { at: { greater_than_equal: day(5), less_than_equal: day(7) } },
+        has('at', (at) => at >= day(5) && at <= day(7)),
+      ],
+      [{ city: { greater_than: 'Rom' } }, has('city', (city) => city > 'Rom')],
+      [{ city: { greater_than_equal: 'Rom' } }, has('city', (city) => city >= 'Rom')],
+      [{ city: { less_than: 'Rome' } }, has('city', (city) => city < 'Rome')],
+      [{ city: { less_than_equal: 'Lima' } }, has('city', (city) => city <= 'Lima')],
+      [
+        { and: [{ score: { greater_than: 0 } }, { name: { not_equals: 'c' } }] },
+        (event) => event.score != null && event.score > 0 && event.name !== 'c',
+      ],
+    ]
+
+    for (const [where, expected] of cases) {
+      const label = JSON.stringify(where)
+      const { partitionReads, result } = await query({ limit: 0, where })
+      expect(names(result.docs).sort(), label).toEqual(
+        events
+          .filter(expected)
+          .map((event) => event.name)
+          .sort(),
+      )
+      expect(partitionReads('events'), label).toBe(0)
+    }
+  })
+
+  it('reads a sorted page through the index, in the order an in-memory sort gives', async () => {
+    for (const sort of ['score', '-score', 'at', '-at', 'city', '-city']) {
+      // `limit: 0` sorts everything in memory: the reference order.
+      const all = (await payload.find({ collection: 'events', depth: 0, limit: 0, sort })).docs
+      for (const page of [1, 2, 3]) {
+        const label = `${sort}, page ${page}`
+        const { partitionReads, result } = await query({ limit: 5, page, pagination: false, sort })
+        expect(names(result.docs), label).toEqual(names(all.slice((page - 1) * 5, page * 5)))
+        expect(partitionReads('events'), label).toBe(0)
+      }
+    }
+  })
+
+  it('applies the rest of the where while walking the index', async () => {
+    const where = { name: { not_in: ['a', 'c'] } }
+    const all = (await payload.find({ collection: 'events', depth: 0, limit: 0, sort: '-score', where }))
+      .docs
+    const { partitionReads, result } = await query({ limit: 4, pagination: false, sort: '-score', where })
+    expect(names(result.docs)).toEqual(names(all.slice(0, 4)))
+    expect(partitionReads('events')).toBe(0)
+  })
+
+  it('counts for pagination without fetching the partition', async () => {
+    const { partitionReads, result } = await query({ limit: 5, page: 2, sort: '-score' })
+    expect(result).toMatchObject({ hasNextPage: true, page: 2, totalDocs: 12, totalPages: 3 })
+    expect(result.docs).toHaveLength(5)
+    // The only walk of the partition is a `COUNT`, which sends no rows back.
+    expect(partitionReads('events', false)).toBe(0)
+    expect(partitionReads('events')).toBe(1)
+  })
+
+  it('still sorts in memory when the field has no index', async () => {
+    const { partitionReads, result } = await query({ limit: 5, pagination: false, sort: 'name' })
+    expect(names(result.docs)).toEqual(['a', 'b', 'c', 'd', 'e'])
+    expect(partitionReads('events')).toBeGreaterThan(0)
+  })
+})
+
+describe('versions', () => {
+  type VersionRow = { id: string; latest?: boolean; parent?: unknown }
+  const versionsOf = async (parent: unknown) =>
+    (await rawPartition('drafts_versions')).filter(
+      (row) => row['parent'] === parent,
+    ) as VersionRow[]
+  const pointerOf = async (parent: unknown) =>
+    (await rawPartition('drafts_versions#latest')).find((row) => row['sk'] === valueKey(parent))
+  const save = (id: number | string, title: string) =>
+    payload.update({ id, collection: 'drafts', data: { title } } as never)
+
+  it('finds the latest version through its pointer, not the partition', async () => {
+    const doc = await payload.create({ collection: 'drafts', data: { title: 'v1' } } as never)
+    const saved = await traced(adapter, () => save(doc.id, 'v2'))
+    expect(saved.partitionReads('drafts_versions')).toBe(0)
+
+    const rows = await versionsOf(doc.id)
+    expect(rows).toHaveLength(2)
+    const latest = rows.filter((row) => row.latest === true)
+    expect(latest).toHaveLength(1)
+    expect((await pointerOf(doc.id))?.['owner']).toBe(latest[0]!.id)
+  })
+
+  it("lists a document's versions, and drafts, without reading the versions partition", async () => {
+    const doc = await payload.create({ collection: 'drafts', data: { title: 'first' } } as never)
+    await save(doc.id, 'second')
+    await save(doc.id, 'third')
+
+    const listed = await traced(adapter, () =>
+      payload.findVersions({
+        collection: 'drafts',
+        depth: 0,
+        where: { parent: { equals: doc.id } },
+      }),
+    )
+    expect(listed.result.docs).toHaveLength(3)
+    expect(listed.partitionReads('drafts_versions')).toBe(0)
+
+    const drafts = await traced(adapter, () =>
+      payload.find({ collection: 'drafts', depth: 0, draft: true, limit: 0 }),
+    )
+    const mine = drafts.result.docs.find((found) => found.id === doc.id) as unknown as {
+      title: string
+    }
+    expect(mine.title).toBe('third')
+    expect(drafts.partitionReads('drafts_versions')).toBe(0)
+
+    const published = await traced(adapter, () =>
+      payload.find({ collection: 'drafts', depth: 0, limit: 0 }),
+    )
+    expect(published.result.docs.some((found) => found.id === doc.id)).toBe(true)
+    expect(published.partitionReads('drafts_versions')).toBe(0)
+  })
+
+  it('leaves exactly one latest version when a document is saved several times at once', async () => {
+    const doc = await payload.create({ collection: 'drafts', data: { title: 'start' } } as never)
+    await Promise.all(Array.from({ length: 6 }, (_, index) => save(doc.id, `at-once-${index}`)))
+
+    const rows = await versionsOf(doc.id)
+    expect(rows).toHaveLength(7)
+    const latest = rows.filter((row) => row.latest === true)
+    expect(latest).toHaveLength(1)
+    expect((await pointerOf(doc.id))?.['owner']).toBe(latest[0]!.id)
+  })
+
+  it('drops the pointer with the latest version, but not with an older one', async () => {
+    const doc = await payload.create({ collection: 'drafts', data: { title: 'old' } } as never)
+    await save(doc.id, 'new')
+    const rows = await versionsOf(doc.id)
+    const latest = rows.find((row) => row.latest === true)!
+    const older = rows.find((row) => row.latest !== true)!
+
+    await adapter.deleteVersions({ collection: 'drafts', where: { id: { equals: older.id } } })
+    expect((await pointerOf(doc.id))?.['owner']).toBe(latest.id)
+
+    await adapter.deleteVersions({ collection: 'drafts', where: { parent: { equals: doc.id } } })
+    expect(await pointerOf(doc.id)).toBeUndefined()
+    expect(await versionsOf(doc.id)).toHaveLength(0)
+    const byParent = await rawPartition('drafts_versions#index#parent')
+    expect(byParent.filter((row) => String(row['sk']).startsWith(`${valueKey(doc.id)}#`))).toHaveLength(
+      0,
+    )
+  })
+
+  it('tracks the single latest version of a global', async () => {
+    await payload.updateGlobal({ slug: 'settings', data: { title: 'one' } } as never)
+    await payload.updateGlobal({ slug: 'settings', data: { title: 'two' } } as never)
+
+    // Payload looks up a global's newest version itself, by sort — that reads
+    // the global's own versions. The adapter's step, demoting the previous
+    // latest, goes through the pointer.
+    const now = new Date().toISOString()
+    const third = await traced(adapter, () =>
+      adapter.createGlobalVersion({
+        autosave: false,
+        createdAt: now,
+        globalSlug: 'settings',
+        updatedAt: now,
+        versionData: { title: 'three' },
+      } as never),
+    )
+    expect(third.partitionReads('settings_versions')).toBe(0)
+
+    const latest = (await rawPartition('settings_versions')).filter((row) => row['latest'] === true)
+    expect(latest).toHaveLength(1)
+    const pointers = await rawPartition('settings_versions#latest')
+    expect(pointers).toHaveLength(1)
+    expect(pointers[0]!['owner']).toBe(latest[0]!['id'])
+  })
+})
+
 describe('documents that predate their indexes', () => {
   it('are read from the partition until a backfill marks the index complete', async () => {
     const now = new Date().toISOString()
@@ -399,8 +654,29 @@ describe('documents that predate their indexes', () => {
         }),
       )
     }
-    // …in a collection whose indexes were never marked complete.
-    for (const sk of ['legacy#index#code', 'legacy#unique#email']) {
+    // …and a version row from before pointers and by-parent rows existed…
+    await adapter.docClient!.send(
+      new PutCommand({
+        TableName: handle.tableName,
+        Item: {
+          id: 'lv1',
+          createdAt: now,
+          latest: true,
+          parent: 'ld1',
+          pk: 'drafts_versions',
+          sk: 'lv1',
+          updatedAt: now,
+          version: { title: 'old' },
+        },
+      }),
+    )
+    // …in partitions whose indexes were never marked complete.
+    for (const sk of [
+      'legacy#index#code',
+      'legacy#unique#email',
+      'drafts_versions#index#parent',
+      'drafts_versions#latest',
+    ]) {
       await adapter.docClient!.send(
         new DeleteCommand({ TableName: handle.tableName, Key: { pk: 'payload-ddb#indexes', sk } }),
       )
@@ -415,10 +691,24 @@ describe('documents that predate their indexes', () => {
       return { found: result.docs.map((doc) => String(doc.id)).sort(), reads: partitionReads('legacy') }
     }
 
+    const oldVersions = async () => {
+      const { partitionReads, result } = await traced(db, () =>
+        second.findVersions({
+          collection: 'drafts',
+          depth: 0,
+          where: { parent: { equals: 'ld1' } },
+        }),
+      )
+      return { found: result.docs.length, reads: partitionReads('drafts_versions') }
+    }
+
     // Nothing points at the old documents yet, so the index isn't trusted.
     const before = await legacy({ code: { equals: 'old' } })
     expect(before.found).toEqual(['l1', 'l2'])
     expect(before.reads).toBeGreaterThan(0)
+    const versionsBefore = await oldVersions()
+    expect(versionsBefore.found).toBe(1)
+    expect(versionsBefore.reads).toBeGreaterThan(0)
 
     const report = await backfillIndexes(second)
     expect(report.collections['legacy']).toMatchObject({
@@ -429,6 +719,9 @@ describe('documents that predate their indexes', () => {
       scanned: 3,
     })
     expect(report.collections['legacy']!.conflicts).toHaveLength(1)
+    // Only the old document lacked a pointer; live ones already had theirs.
+    expect(report.versions['drafts']!.pointers).toBe(1)
+    expect(await oldVersions()).toEqual({ found: 1, reads: 0 })
 
     expect(await legacy({ code: { equals: 'old' } })).toEqual({ found: ['l1', 'l2'], reads: 0 })
 

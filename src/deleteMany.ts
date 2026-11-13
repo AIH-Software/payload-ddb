@@ -25,6 +25,6 @@ export const deleteMany: DeleteMany = async function deleteMany(
     matched,
     // Unique guards and index rows go together with the documents they
     // point at.
-    hasCompanionRows(this, collection) ? collection : undefined,
+    hasCompanionRows(this, collection) ? { collection } : {},
   )
 }

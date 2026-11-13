@@ -7,17 +7,20 @@ import { getByPath } from './getByPath.js'
  * `'field'` ascending, `'-field'` descending. Multiple sort keys are applied
  * as tiebreakers in order.
  *
- * Sorts in JS because DynamoDB `Scan` returns rows in indeterminate order;
- * Query-on-GSI sort comes when we wire access patterns up later.
+ * Rows that tie on every key are ordered by id, in the direction of the
+ * first key. That makes the order total — the same rows always come out the
+ * same way, whatever order they were read in — and it is the order an index
+ * walk produces (`findOrderedPage`), so a page read through an index lines
+ * up with the pages around it that were sorted here.
  */
 export function applySorts(items: Record<string, unknown>[], sort: Sort | undefined): void {
   if (!sort) return
-  const keys = Array.isArray(sort) ? sort : [sort]
+  const keys = (Array.isArray(sort) ? sort : [sort]).filter(Boolean)
   if (keys.length === 0) return
+  const tieDirection = keys[0]!.startsWith('-') ? -1 : 1
 
   items.sort((a, b) => {
     for (const raw of keys) {
-      if (!raw) continue
       const descending = raw.startsWith('-')
       const path = descending ? raw.slice(1) : raw
       const av = getByPath(a, path)
@@ -27,7 +30,9 @@ export function applySorts(items: Record<string, unknown>[], sort: Sort | undefi
         return descending ? -cmp : cmp
       }
     }
-    return 0
+    const aid = String(a['id'])
+    const bid = String(b['id'])
+    return aid === bid ? 0 : aid < bid ? -tieDirection : tieDirection
   })
 }
 

@@ -22,16 +22,18 @@ export async function queryCount(
   adapter: DynamoAdapter,
   partition: string,
   where: undefined | Where,
+  /** `skipIndex`: the caller already tried `findByIndex` and it passed. */
+  options: { skipIndex?: boolean } = {},
 ): Promise<number> {
   const compiled = buildFilterExpression(where)
   // Always-false predicate (e.g. `in: []`) → zero rows without a round-trip.
   if (compiled.never) return 0
 
-  const viaIndex = await findByIndex(adapter, partition, where)
+  const viaIndex = options.skipIndex ? null : await findByIndex(adapter, partition, where)
   if (viaIndex) return viaIndex.length
 
   if (!compiled.exact) {
-    return (await queryMatching(adapter, partition, where)).length
+    return (await queryMatching(adapter, partition, where, options)).length
   }
 
   let totalDocs = 0

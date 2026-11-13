@@ -110,8 +110,12 @@ value in the same physical table.
   silently overwrite each other.
 - **Unique guards:** `pk = "<slug>#unique#<field path>"`, `sk = "<value>"`,
   one small row per value of a `unique: true` field. See *Unique fields*.
-- **Index rows:** `pk = "<slug>#index#<field path>"`, `sk = "<value>#<id>"`,
-  one small row per value of an `index: true` field. See *Indexes*.
+- **Index rows:** `pk = "<slug>#index#<field path>"`,
+  `sk = "<value key>#<id>"`, one small row per value of an `index: true`
+  field. Value keys sort the way the values do. See *Indexes*.
+- **Latest-version pointers:** `pk = "<slug>_versions#latest"`,
+  `sk = "<parent key>"`, one row per versioned document naming its latest
+  version.
 - **Index markers:** `pk = "payload-ddb#indexes"`, one row per index that is
   known to cover every document.
 - **No GSIs or LSIs.** Indexes are ordinary rows in the same table, which is
@@ -164,57 +168,77 @@ Every Payload `where` operator is supported: `equals`, `not_equals`,
 
 ### Indexes
 
-A filter normally reads the collection's whole partition. Three kinds of
-clause avoid that and read only the matching documents:
+A filter normally reads the collection's whole partition. These clauses avoid
+that and read only the matching documents:
 
 | Clause | Answered from |
 |---|---|
 | `id` `equals` / `in` | the documents' own keys |
 | `equals` / `in` on a `unique: true` field | the field's unique guards |
 | `equals` / `in` on an `index: true` field | index rows |
+| `greater_than(_equal)` / `less_than(_equal)` on an `index: true` field | index rows, which are kept in value order |
 
 The clause has to hold for every result: at the top level or inside `and`,
 not on one side of an `or`. The rest of the `where` is then evaluated on the
 documents it selects. This covers login by `email`, pages by `slug`,
-relationship population (`id in [...]`), filters on a relationship, and join
-fields.
+relationship population (`id in [...]`), filters on a relationship, join
+fields, and date or number ranges.
 
-- **Which fields.** `index: true` on a `text`, `email`, `number`,
+- **Which fields.** `index: true` on a `text`, `email`, `number`, `date`,
   `relationship` or `upload` field — including `hasMany` fields (one row per
   element), fields in groups and named tabs, and localized fields (per
-  locale). Payload sets the flag itself on the field a join points at. Fields
-  in arrays or blocks, polymorphic relationships, and types where equality
-  rarely narrows a read (`checkbox`, `date`, `select`) are not indexed.
+  locale). Payload sets the flag itself on the field a join points at.
+  Not indexed: fields in arrays or blocks, polymorphic relationships, types
+  where equality rarely narrows a read (`checkbox`, `select`), and the
+  timestamps Payload manages (`createdAt`, `updatedAt`, `deletedAt`), where
+  an index would turn every insert or update into a transaction.
+- **Sorted pages.** A `find` sorted by one single-valued indexed field walks
+  that field's index in order and stops when the page is full, instead of
+  reading and sorting the collection. With `pagination: false` nothing else
+  is read. With pagination, the total comes from a `COUNT` pass over the
+  partition, which returns no documents but is still billed for the read.
+  Not used on drafts-enabled collections, for sorts on several fields, or
+  for pages more than 2,000 documents deep.
 - **Consistency.** Index rows are written in the same transaction as their
   document and read with strong consistency, so a lookup sees a document as
   soon as it is written — which a DynamoDB GSI can't promise.
 - **Write cost.** A write that adds or removes index rows is a transaction:
   twice the write units for the document, plus the rows. An update that
-  leaves the indexed fields alone costs what it did before.
+  leaves the indexed fields alone costs what it did before. A single-valued
+  indexed field has a row for every document, blank ones included, so
+  inserts into a collection with one are always transactions.
 - **Large matches.** A lookup that finds more than 256 candidate documents
   falls back to reading the partition, which is the cheaper read by then.
-- **Opting out.** `indexes: false` stops both the index rows and the routed
-  lookups. Lookups by `id` and unique enforcement are unaffected. Every
-  instance sharing a table must use the same setting.
+- **Opting out.** `indexes: false` stops the index rows, the pointers and
+  the routed lookups. Lookups by `id` and unique enforcement are unaffected.
+  Every instance sharing a table must use the same setting.
+
+**Versions.** Version rows are indexed by their `parent`, so listing or
+pruning one document's versions reads only those. Each versioned document
+(and each versioned global) also has a pointer to its latest version: saving
+finds the version to demote in two key reads, and listing drafts fetches one
+version per document rather than every version of every document.
 
 **Existing data.** An index is only used once it is known to cover every
-document. A collection that is empty when the adapter starts qualifies
-straight away, which covers new tables and new collections. For a collection
-that already has documents — after upgrading, or after adding `index: true`
-to a field — run the backfill once; until then its lookups keep reading the
-partition:
+row. A partition that is empty when the adapter starts qualifies straight
+away, which covers new tables and new collections. For one that already has
+rows — after upgrading, or after adding `index: true` to a field — run the
+backfill once; until then its lookups keep reading the partition:
 
 ```ts
 import { backfillIndexes } from '@aih-software/payload-ddb'
 
 const report = await backfillIndexes(payload)
 // report.collections[slug].ready lists the indexes now in use
+// report.versions[slug] covers that collection's or global's versions
 ```
 
-The backfill is safe to run while the application is serving. When upgrading
-from a version before 4.2, finish the rollout first: older instances write
-documents without index rows, so run the backfill once after the last one is
-gone.
+The backfill is safe to run while the application is serving, and safe to
+re-run. It also removes stray index rows, which an interrupted write can
+leave behind (lookups ignore them, so they cost a little space, not
+correctness). When upgrading from a version before 4.2, finish the rollout
+first: older instances write rows without their index rows, so run the
+backfill once after the last one is gone.
 
 ### Join fields
 
@@ -236,6 +260,10 @@ target's published rows.
   per adapter call: Payload's own `update` operation fills the fields missing
   from a patch with the values it read beforehand, so two concurrent
   `payload.update` calls on one document can still overwrite each other.
+- **One latest version.** Creating a version demotes the previous latest and
+  moves the document's pointer in one transaction that checks nobody else got
+  there first, so saving a document several times at once still leaves
+  exactly one version marked latest.
 - **Jobs are claimed once.** `updateJobs` uses the same check, so two workers
   polling the queue can't both take the same job.
 - **Bulk writes are bounded.** `updateMany`, `deleteMany` and `deleteVersions`
@@ -271,13 +299,18 @@ alias.
 
 ## Known limits / future work
 
-- **Indexes answer equality only.** Range filters (`greater_than`, …),
-  sorting and pagination still read the partition and work in memory, as does
-  any filter without an indexed `equals` / `in` clause. Sorted indexes are
-  the next optimization milestone.
-- **Version rows aren't indexed.** On a drafts-enabled collection, saving a
-  document and listing drafts both read that collection's versions
-  partition.
+- **Unindexed filters and sorts read the partition.** That includes the
+  default sort on `createdAt`, sorts on several fields, and any filter with
+  no indexed clause. The matches are sorted and paged in memory.
+- **Totals are counted.** A paginated `find` that reads its page through an
+  index still counts the matches with a pass over the partition.
+- **Drafts are listed in full.** A drafts listing fetches the latest version
+  of every document — one read each, not the whole versions partition — and
+  then filters, sorts and pages in memory. `find` on a drafts-enabled
+  collection does the same for documents it hasn't already matched.
+- **A document's versions are read together.** Payload looks up a document's
+  (or global's) newest version by sort before each save, which reads all of
+  that document's versions — bounded by `versions.maxPerDoc`.
 - **Payload-level transactions are no-op.** `beginTransaction` returns `null`;
   commit/rollback do nothing. Per-method atomicity (e.g. `createVersion`'s
   flip+put) uses DynamoDB `TransactWriteItems` already; full Payload-context

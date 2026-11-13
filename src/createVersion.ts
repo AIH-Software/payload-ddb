@@ -4,22 +4,26 @@ import { randomUUID } from 'node:crypto'
 
 import type { DynamoAdapter } from './types.js'
 
-import { findFirst } from './utilities/findFirst.js'
+import { backoff, conflictError, MAX_WRITE_ATTEMPTS } from './utilities/optimistic.js'
 import { projectVersionSnapshot } from './utilities/resolveSchema.js'
-import { putVersionAsLatest } from './utilities/writeItems.js'
+import { findLatestVersion } from './utilities/versionIndex.js'
+import { isConditionalCheckFailed, putVersionAsLatest } from './utilities/writeItems.js'
 
 /**
  * Insert a new version for a collection's parent doc, maintaining the
  * `latest=true` invariant per parent.
  *
- * Two round trips:
- *  1. `Query` the versions partition for the previous `latest=true` row.
- *  2. `putVersionAsLatest` flips that row's `latest` to false and puts the
- *     new row in one atomic `TransactWriteItems` call. If a crash occurs
- *     mid-flow neither mutation lands, so we never end up with two
- *     `latest=true` rows or zero. The flip carries `attribute_exists(pk)` so
- *     the transaction fails cleanly if the previous row was deleted between
- *     (1) and (2).
+ * Two steps:
+ *  1. Find the previous `latest=true` row — through the parent's pointer
+ *     (two key reads), or by reading the versions partition while pointers
+ *     aren't complete yet (`findLatestVersion`).
+ *  2. `putVersionAsLatest` flips that row's `latest` to false, puts the new
+ *     row and moves the pointer in one atomic `TransactWriteItems` call. If
+ *     a crash occurs mid-flow none of it lands, so we never end up with two
+ *     `latest=true` rows or zero.
+ *
+ * If another save of the same document got in between the two steps, the
+ * transaction's conditions fail and both steps are repeated.
  *
  * `autosave` is persisted on the row even though it isn't surfaced in
  * `TypeWithVersion` — `findVersions` filters by it.
@@ -39,11 +43,6 @@ export const createVersion: CreateVersion = async function createVersion(
   },
 ) {
   const partition = this.resolveVersionsPartition(collectionSlug)
-
-  const previousLatest = await findFirst(this, {
-    partition,
-    where: { and: [{ parent: { equals: parent } }, { latest: { equals: true } }] },
-  })
 
   const id = randomUUID()
   // Project the snapshot against the parent collection's schema so that any
@@ -66,7 +65,17 @@ export const createVersion: CreateVersion = async function createVersion(
     ...(publishedLocale !== undefined ? { publishedLocale } : {}),
   }
 
-  await putVersionAsLatest(this, partition, item, previousLatest)
+  for (let attempt = 1; ; attempt++) {
+    const { pointer, previous } = await findLatestVersion(this, partition, parent)
+    try {
+      await putVersionAsLatest(this, partition, item, previous, pointer)
+      break
+    } catch (err) {
+      if (!isConditionalCheckFailed(err)) throw err
+      if (attempt >= MAX_WRITE_ATTEMPTS) throw conflictError()
+      await backoff(attempt)
+    }
+  }
 
   return returning === false ? (null as never) : (item as never)
 }

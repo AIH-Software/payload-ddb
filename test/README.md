@@ -38,7 +38,7 @@ test/
   localization/                # filters and sorts on localized fields
   joins/                       # join fields, incl. hasMany and polymorphic
   integrity/                   # concurrent updates, job claiming, unique fields and their backfill
-  indexes/                     # lookups by id, unique and indexed fields; index rows and their backfill
+  indexes/                     # lookups, ranges and sorted pages through indexes; version pointers; backfill
   versions/                    # versions, drafts, queryDrafts, drafts-only fallback
   globals/                     # globals + global versions latest invariant
   relationships/               # single, hasMany, polymorphic

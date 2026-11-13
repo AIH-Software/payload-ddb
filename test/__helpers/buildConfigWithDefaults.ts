@@ -33,6 +33,10 @@ export async function buildConfigWithDefaults(
     telemetry: false,
     ...testConfig,
     typescript: {
+      // Outside production Payload spawns `payload generate:types` on every
+      // boot. With no config file for it to load, that child never exits —
+      // each suite would leave one behind, spinning.
+      autoGenerate: false,
       declare: false,
       ...testConfig.typescript,
     },

@@ -7,12 +7,15 @@ import { matchesWhere } from './utilities/matchesWhere.js'
 import { prepareCollectionWhere, prepareSort } from './utilities/prepareWhere.js'
 import { queryMatching } from './utilities/queryMatching.js'
 import { resolveJoins } from './utilities/resolveJoins.js'
+import { latestVersionRows } from './utilities/versionIndex.js'
 
 /**
  * Return the latest version of every doc as a paginated, doc-shaped result.
  *
  * Strategy:
- *  1. Query the versions partition for `latest=true` rows (one per parent).
+ *  1. Fetch the `latest=true` version rows (one per parent) — through the
+ *     parents' pointers, or by reading the versions partition while those
+ *     aren't complete yet (`latestVersionRows`).
  *  2. Project each row's `version` payload up to top-level so the result
  *     looks like a doc — this lets the user's `where` / `sort` operate in
  *     doc-field terms instead of `version.x` paths.
@@ -62,7 +65,7 @@ export const queryDrafts: QueryDrafts = async function queryDrafts(
   const docsPartition = this.resolvePartition(collection)
 
   const [latestRows, mainRows] = await Promise.all([
-    queryMatching(this, versionsPartition, { latest: { equals: true } }),
+    latestVersionRows(this, versionsPartition),
     queryMatching(this, docsPartition, undefined),
   ])
 

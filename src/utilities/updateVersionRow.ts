@@ -46,7 +46,7 @@ export async function updateVersionRow(
     // snapshot. Catches stray keys at either layer plus stale leaks already
     // persisted on the target.
     const projected = projectVersionRow(adapter, parent, merged)
-    await putItem(adapter, partition, projected, { replaces: target })
+    await putItem(adapter, partition, projected, { replaces: target, version: true })
     return projected
   })
 

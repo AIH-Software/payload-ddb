@@ -93,7 +93,11 @@ function containsUnique(fields: FlattenedField[]): boolean {
  * Walk a document along its collection's schema and report the value of
  * every field `accept` picks. Groups and named tabs are descended into;
  * arrays and blocks are not (a row in a list has no single stored path). A
- * localized field is reported once per locale it has a value for.
+ * localized field is reported once per configured locale.
+ *
+ * Every accepted field is reported even when the document has nothing
+ * there — a missing group, a locale without a value — with `undefined` as
+ * its value, so callers that need one entry per document get one.
  */
 export function visitLeaves(
   adapter: DynamoAdapter,
@@ -117,8 +121,10 @@ export function visitLeaves(
     storedPath: string[],
     parentIsLocalized: boolean,
   ): void {
-    if (!source || typeof source !== 'object' || Array.isArray(source)) return
-    const record = source as Record<string, unknown>
+    const record =
+      source && typeof source === 'object' && !Array.isArray(source)
+        ? (source as Record<string, unknown>)
+        : {}
 
     for (const field of level) {
       if (field.type === 'array' || field.type === 'blocks') continue
@@ -131,14 +137,13 @@ export function visitLeaves(
       const localized = Boolean(localeCodes) && fieldShouldBeLocalized({ field, parentIsLocalized })
 
       // A localized field holds one value per locale; visit each.
-      const variants: [unknown, string[]][] =
-        localized && value && typeof value === 'object' && !Array.isArray(value)
-          ? Object.entries(value as Record<string, unknown>)
-              .filter(([locale]) => localeCodes!.includes(locale))
-              .map(([locale, inner]) => [inner, [...stored, locale]])
-          : localized
-            ? []
-            : [[value, stored]]
+      const perLocale =
+        value && typeof value === 'object' && !Array.isArray(value)
+          ? (value as Record<string, unknown>)
+          : {}
+      const variants: [unknown, string[]][] = localized
+        ? localeCodes!.map((locale) => [perLocale[locale], [...stored, locale]])
+        : [[value, stored]]
 
       for (const [inner, innerStored] of variants) {
         if (isContainer) {
