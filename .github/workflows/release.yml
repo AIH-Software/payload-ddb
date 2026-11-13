@@ -37,7 +37,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 22.x
+          node-version: 24.x
           registry-url: 'https://npm.pkg.github.com'
           scope: '@aih-software'
 
@@ -125,6 +125,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      # npm trusted publishing: the job proves who it is with a short-lived
+      # OIDC token instead of a stored npm token.
+      id-token: write
     steps:
       - name: Checkout at release tag
         uses: actions/checkout@v4
@@ -137,7 +140,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: 22.x
+          node-version: 24.x
           registry-url: 'https://registry.npmjs.org'
           scope: '@open-aih'
 
@@ -161,6 +164,14 @@ jobs:
           "
 
       - name: Publish to npmjs
-        run: pnpm publish --no-git-checks --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        # No token: npm authenticates through trusted publishing (OIDC). That
+        # needs npm >= 11.5.1, which is why this calls the npm CLI directly
+        # (pnpm 10 has no OIDC support of its own) on Node 24. The trusted
+        # publisher configured on npmjs.com for @open-aih/payload-ddb must
+        # name this repository and this workflow file (`release.yml`), with
+        # no environment. The repo is public, so npm also attaches a
+        # provenance attestation, which requires `repository.url` in
+        # package.json to keep pointing at this repository.
+        run: |
+          echo "node $(node --version), npm $(npm --version)"
+          npm publish --access public
