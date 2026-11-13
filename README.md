@@ -3,21 +3,34 @@
 An unofficial database adapter for [PayloadCMS](https://payloadcms.com) that
 stores data in [Amazon DynamoDB](https://aws.amazon.com/dynamodb/).
 
-> **Status:** all `BaseDatabaseAdapter` methods are implemented end-to-end. The
-> common access patterns (CRUD, drafts, versions, globals, locales-as-fields)
-> work today. The current strategy is "correct first, optimize later" — single
-> shared table with a `Query`-per-collection access pattern, no GSIs, no range
-> operators in `FilterExpression`. Suitable for development and
-> small-to-medium workloads; large collections will want the optimization
-> milestones tracked in the issues.
+> **Status:** all `BaseDatabaseAdapter` methods are implemented end-to-end:
+> CRUD, drafts, versions, globals, localization, every `where` operator, join
+> fields and unique fields. The current strategy is "correct first, optimize
+> later" — a single shared table with a `Query`-per-collection access pattern
+> and no GSIs. Suitable for development and small-to-medium workloads; large
+> collections will want the optimizations listed under *Known limits*.
+
+## Requirements
+
+- **Payload 3.x.** The peer range is `payload >=3.0.0`; the test suite runs
+  against 3.93.
+- **Node.js as your Payload version requires.** Payload 3.92 and later need
+  Node 22.23.4+ or 24.22.1+. This repo's CI runs on Node 24.
 
 ## Installation
 
+The package is published under two names with the same contents:
+
 ```bash
+# Public npm registry — minor and major releases
+pnpm add @open-aih/payload-ddb
+
+# GitHub Packages — every release, including patches
 pnpm add @aih-software/payload-ddb
-# or
-npm install @aih-software/payload-ddb
 ```
+
+The examples below import from `@aih-software/payload-ddb`; use
+`@open-aih/payload-ddb` instead if that is the one you installed.
 
 ## Quick start (DynamoDB Local)
 
@@ -75,6 +88,7 @@ value in the same physical table.
 | `translateConfig` | `TranslateConfig` | `removeUndefinedValues: true`, `convertClassInstanceToMap: true` | Marshalling options forwarded to `DynamoDBDocumentClient.from`. |
 | `tableName` | `string` | `'payload'` | The single DynamoDB table backing every collection, global, and versions stream. |
 | `ensureTables` | `boolean` | `false` | When true, auto-creates the table at init if it doesn't exist. Dev-loop convenience; turn off in production. |
+| `migrationDir` | `string` | `'migrations'` | Directory Payload reads and writes migration files in. |
 
 ## Data layout
 
@@ -93,7 +107,7 @@ value in the same physical table.
   silently overwrite each other.
 - **Unique guards:** `pk = "<slug>#unique#<field path>"`, `sk = "<value>"`,
   one small row per value of a `unique: true` field. See *Unique fields*.
-- **No GSIs or LSIs in v2.** Per-collection reads are `Query`s scoped by `pk`;
+- **No GSIs or LSIs.** Per-collection reads are `Query`s scoped by `pk`;
   predicates beyond `pk` get pushed to `FilterExpression` (DynamoDB still
   reads every row in the partition before filtering).
 
@@ -153,7 +167,10 @@ Joined documents are read from the target's published rows.
   `ValidationError` on `id` rather than replacing the existing document.
 - **No lost updates.** Updates are read-merge-write, conditional on the row's
   revision. If another writer gets in first, the patch is re-applied to the
-  fresh row, so concurrent updates to different fields both land.
+  fresh row, so concurrent updates to different fields both land. This holds
+  per adapter call: Payload's own `update` operation fills the fields missing
+  from a patch with the values it read beforehand, so two concurrent
+  `payload.update` calls on one document can still overwrite each other.
 - **Jobs are claimed once.** `updateJobs` uses the same check, so two workers
   polling the queue can't both take the same job.
 - **Bulk writes are bounded.** `updateMany`, `deleteMany` and `deleteVersions`
@@ -203,13 +220,16 @@ const report = await backfillUniqueGuards(payload)
   the GSI milestone is what removes it.
 - **Joins don't see unpublished drafts** of the joined collection.
 - **`locale: 'all'`** in a filter or sort falls back to the default locale.
+- **`like` matches its operand as one substring.** Payload's Mongo adapter
+  splits the operand into words and requires each of them to match.
 - **Items are limited to 400 KB**, including a version row's full snapshot.
 
 ## Development
 
 The package ships with a vitest integration test harness that boots Payload
 against DynamoDB Local. Each spec file uses a unique table name so vitest
-workers can run in parallel against a single shared container. Also make sure port 8000 is open.
+workers can run in parallel against a single shared container, which listens
+on port 8001. Use Node 24, the version CI runs.
 
 ```bash
 pnpm install
@@ -226,6 +246,23 @@ reachable. Override the host/port with `PAYLOAD_DDB_TEST_HOST` /
 
 See [`test/README.md`](./test/README.md) for the harness layout and how to
 add a new spec.
+
+### Releasing
+
+Releases are cut by CI on every push to `main` that carries a
+[changeset](https://github.com/changesets/changesets) (`pnpm changeset`):
+
+1. The integration tests run.
+2. The version is bumped, committed as `chore(release): vX.Y.Z` and tagged.
+3. The package is published to GitHub Packages as
+   `@aih-software/payload-ddb`, and a GitHub Release is created.
+4. For minor and major bumps, the same build is published to the public npm
+   registry as `@open-aih/payload-ddb`.
+
+The public publish uses npm
+[trusted publishing](https://docs.npmjs.com/trusted-publishers), so there is
+no npm token to rotate. The trusted publisher configured on npmjs.com must
+name this repository and the workflow file `release.yml`.
 
 ## License
 
