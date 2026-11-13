@@ -1,22 +1,34 @@
 import type { Where } from 'payload'
 
 import { normalizeForDynamo } from './normalizeForDynamo.js'
-import { SUPPORTED_OPERATORS, unsupportedOperatorError } from './operators.js'
+import {
+  JS_ONLY_MARKER,
+  JS_ONLY_OPERATORS,
+  SUPPORTED_OPERATORS,
+  unsupportedOperatorError,
+} from './operators.js'
 
 /**
  * Compile a Payload `Where` into a DynamoDB `FilterExpression` plus its
  * companion `ExpressionAttributeNames` / `ExpressionAttributeValues` maps.
  *
- * Return contract:
- *  - `undefined` — no filter to apply (empty/missing `where`, or only no-op
- *    clauses like `and: []`). Callers should query without a filter.
- *  - `null` — the predicate is structurally always-false (e.g. an empty
- *    `id: { in: [] }`). Callers should short-circuit and return zero rows
- *    without ever hitting DynamoDB. Payload uses empty `in` as a "match
- *    nothing" sentinel (typically from access control resolving to no IDs);
- *    surfacing it as a filter would mean throwing or constructing an
- *    invalid `IN ()` clause.
- *  - `FilterExpression` — actual predicate to push down.
+ * The result is a *prefilter*: it never rejects a row the `where` accepts,
+ * but it may let through rows the `where` rejects. `exact` says which:
+ *
+ *  - `exact: true` — the filter (or its absence) is the whole `where`; rows
+ *    DynamoDB returns need no further checking.
+ *  - `exact: false` — some clause couldn't be expressed (a JS-only operator
+ *    such as `like`, or a path `castWhere` marked as running through an
+ *    array). That clause is left out, so callers must re-check every
+ *    returned row with `matchesWhere`. Everything that *could* be expressed
+ *    still narrows the read server-side.
+ *
+ * `never: true` means the predicate is structurally always-false (e.g. an
+ * empty `id: { in: [] }`). Callers should short-circuit and return zero rows
+ * without ever hitting DynamoDB. Payload uses empty `in` as a "match
+ * nothing" sentinel (typically from access control resolving to no IDs);
+ * surfacing it as a filter would mean throwing or constructing an invalid
+ * `IN ()` clause.
  *
  * Throws on any operator outside `operators.ts`'s supported set, identical
  * to `matchesWhere` — coverage is enforced from one source so the in-JS
@@ -31,9 +43,12 @@ import { SUPPORTED_OPERATORS, unsupportedOperatorError } from './operators.js'
  *    keeps the expression readable.
  *  - Dotted paths in `where` keys are split on `.` so DynamoDB document-path
  *    syntax (`#a.#b`) is produced for nested fields.
- *  - `in: []` propagates a NEVER sentinel through the AND/OR algebra:
- *    AND with NEVER → NEVER (whole result `null`); OR with NEVER drops the
- *    NEVER branch; an OR whose every branch is NEVER itself becomes NEVER.
+ *  - A clause compiles to an expression string, to `''` (always true — no
+ *    constraint), or to the NEVER sentinel (always false). AND drops `''`
+ *    and collapses to NEVER if any part is NEVER; OR drops NEVER branches
+ *    and collapses to `''` if any branch is `''`. An inexpressible clause
+ *    compiles to `''` and clears `exact`, which keeps the result a superset
+ *    under both AND and OR.
  *  - `not_in: []` is treated as no constraint (the complement of an empty
  *    set is everything, so omitting it from the expression matches semantics).
  */
@@ -43,10 +58,17 @@ export type FilterExpression = {
   values: Record<string, unknown>
 }
 
+export type CompiledFilter = {
+  exact: boolean
+  filter?: FilterExpression
+  never: boolean
+}
+
 const NEVER = Symbol('payload-ddb-filter-never')
 type Compiled = string | typeof NEVER
 
 type Ctx = {
+  exact: boolean
   nameByPlaceholder: Record<string, string>
   nameCounter: number
   placeholderBySegment: Map<string, string>
@@ -54,12 +76,11 @@ type Ctx = {
   values: Record<string, unknown>
 }
 
-export function buildFilterExpression(
-  where: undefined | Where,
-): FilterExpression | null | undefined {
-  if (!where) return undefined
+export function buildFilterExpression(where: undefined | Where): CompiledFilter {
+  if (!where) return { exact: true, never: false }
 
   const ctx: Ctx = {
+    exact: true,
     nameByPlaceholder: {},
     nameCounter: 0,
     placeholderBySegment: new Map(),
@@ -68,14 +89,38 @@ export function buildFilterExpression(
   }
 
   const expression = compile(where, ctx)
-  if (expression === NEVER) return null
-  if (!expression) return undefined
+  if (expression === NEVER) return { exact: true, never: true }
+  if (!expression) return { exact: ctx.exact, never: false }
 
   return {
-    expression,
-    names: ctx.nameByPlaceholder,
-    values: ctx.values,
+    exact: ctx.exact,
+    filter: {
+      expression,
+      names: onlyReferenced(ctx.nameByPlaceholder, expression, /#n\d+/g),
+      values: onlyReferenced(ctx.values, expression, /:v\d+/g),
+    },
+    never: false,
   }
+}
+
+/**
+ * DynamoDB rejects a request that declares an expression name or value the
+ * expression never uses. Placeholders get registered as clauses compile, but
+ * a clause can still end up contributing nothing (a skipped JS-only
+ * operator, `not_in: []`, a branch dropped from an OR), so keep only what
+ * the final expression references.
+ */
+function onlyReferenced<T>(
+  registered: Record<string, T>,
+  expression: string,
+  pattern: RegExp,
+): Record<string, T> {
+  const used = new Set(expression.match(pattern) ?? [])
+  const out: Record<string, T> = {}
+  for (const [placeholder, value] of Object.entries(registered)) {
+    if (used.has(placeholder)) out[placeholder] = value
+  }
+  return out
 }
 
 function compile(where: Where, ctx: Ctx): Compiled {
@@ -97,12 +142,20 @@ function compile(where: Where, ctx: Ctx): Compiled {
 
     if (!raw || typeof raw !== 'object') continue
 
-    const path = pathRef(ctx, key)
     const operators = raw as Record<string, unknown>
+    // `castWhere` marks clauses whose path can't be a DynamoDB document path
+    // (it runs through an array). Leave the whole clause to `matchesWhere`.
+    const pathIsJsOnly = JS_ONLY_MARKER in operators
+    const path = pathIsJsOnly ? '' : pathRef(ctx, key)
 
     for (const [operator, expected] of Object.entries(operators)) {
+      if (operator === JS_ONLY_MARKER) continue
       if (!SUPPORTED_OPERATORS.has(operator)) {
         throw unsupportedOperatorError(operator, key)
+      }
+      if (pathIsJsOnly || JS_ONLY_OPERATORS.has(operator)) {
+        ctx.exact = false
+        continue
       }
       const expr = operatorToExpression(operator, path, expected, ctx)
       if (expr === NEVER) return NEVER
@@ -129,6 +182,9 @@ function compileGroup(raw: unknown, ctx: Ctx, joiner: 'AND' | 'OR'): Compiled {
       neverCount++
       continue
     }
+    // An unconstrained branch makes the whole OR unconstrained. (Dropping it
+    // and keeping the others would narrow the result.)
+    if (!expr && joiner === 'OR') return ''
     if (expr) subs.push(expr)
   }
   // OR over branches that all collapsed to NEVER is NEVER itself.
@@ -195,11 +251,6 @@ function operatorToExpression(
         ? `(attribute_exists(${path}) AND NOT attribute_type(${path}, ${nullType}))`
         : `(attribute_not_exists(${path}) OR attribute_type(${path}, ${nullType}))`
     }
-    case 'like':
-      // JS-only: `whereHasJsOnlyOperator` should have steered the helpers
-      // away from compiling this `where` server-side. Returning '' is a
-      // belt-and-braces no-op in case a caller compiles directly.
-      return ''
     case 'in': {
       if (!Array.isArray(expected)) return ''
       if (expected.length === 0) return NEVER

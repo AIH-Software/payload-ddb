@@ -2,8 +2,9 @@ import type { DeleteOne } from 'payload'
 
 import type { DynamoAdapter } from './types.js'
 
-import { castCollectionWhere } from './utilities/castWhere.js'
 import { findFirst } from './utilities/findFirst.js'
+import { prepareCollectionWhere } from './utilities/prepareWhere.js'
+import { hasUniqueFields } from './utilities/uniqueGuards.js'
 import { whereToId } from './utilities/whereToId.js'
 import { deleteItem } from './utilities/writeItems.js'
 
@@ -11,12 +12,15 @@ export const deleteOne: DeleteOne = async function deleteOne(
   this: DynamoAdapter,
   { collection, returning, where: rawWhere },
 ) {
-  const where = castCollectionWhere(this, collection, rawWhere)
+  const where = await prepareCollectionWhere(this, collection, rawWhere)
   const partition = this.resolvePartition(collection)
   const idFromWhere = whereToId(where)
+  // Releasing a document's unique guards needs its values, so those
+  // collections always read the document first.
+  const guarded = hasUniqueFields(this, collection)
 
   // Fast path — pure id-equality lets us delete and capture the doc in one call.
-  if (idFromWhere !== null) {
+  if (idFromWhere !== null && !guarded) {
     const deleted = await deleteItem(this, partition, idFromWhere, { returnOld: true })
     if (returning === false) {
       return null as never
@@ -24,13 +28,19 @@ export const deleteOne: DeleteOne = async function deleteOne(
     return deleted as never
   }
 
-  // Slow path — locate by query, then delete by composite key.
+  // Slow path — locate (a `GetItem` when `where` is an id), then delete by
+  // composite key.
   const found = await findFirst(this, { partition, where })
   if (!found) {
     return null as never
   }
 
-  await deleteItem(this, partition, found['id'])
+  await deleteItem(
+    this,
+    partition,
+    found['id'],
+    guarded ? { unique: { collection, doc: found } } : {},
+  )
 
   if (returning === false) {
     return null as never

@@ -3,9 +3,10 @@ import type { Find, PaginatedDocs } from 'payload'
 import type { DynamoAdapter } from './types.js'
 
 import { applySorts } from './utilities/applySorts.js'
-import { castCollectionWhere } from './utilities/castWhere.js'
 import { collectionHasDrafts, fetchDraftsOnlySupplements } from './utilities/draftsFallback.js'
+import { prepareCollectionWhere, prepareSort } from './utilities/prepareWhere.js'
 import { queryMatching } from './utilities/queryMatching.js'
+import { resolveJoins } from './utilities/resolveJoins.js'
 
 /**
  * v2 strategy: paginated `Query` over the collection's partition (`pk = slug`)
@@ -26,9 +27,9 @@ import { queryMatching } from './utilities/queryMatching.js'
  */
 export const find: Find = async function find(
   this: DynamoAdapter,
-  { collection, limit = 10, page = 1, pagination = true, sort, where: rawWhere },
+  { collection, joins, limit = 10, locale, page = 1, pagination = true, sort, where: rawWhere },
 ) {
-  const where = castCollectionWhere(this, collection, rawWhere)
+  const where = await prepareCollectionWhere(this, collection, rawWhere, locale)
   const matched = await queryMatching(this, this.resolvePartition(collection), where)
 
   if (collectionHasDrafts(this, collection)) {
@@ -36,7 +37,7 @@ export const find: Find = async function find(
     matched.push(...supplements)
   }
 
-  applySorts(matched, sort)
+  applySorts(matched, prepareSort(this, { kind: 'collection', slug: collection }, sort, locale))
 
   const totalDocs = matched.length
   // `limit: 0` disables the cap. When pagination is false, limit/page still
@@ -47,6 +48,8 @@ export const find: Find = async function find(
   const start = useLimit ? (safePage - 1) * limit : 0
   const end = useLimit ? start + limit : totalDocs
   const docs = matched.slice(start, end)
+  // Only the page being returned — joins cost a query per target collection.
+  await resolveJoins(this, { collectionSlug: collection, docs, joins, locale })
 
   const effectiveLimit = useLimit ? limit : totalDocs
   const totalPages = pagination && useLimit ? Math.max(1, Math.ceil(totalDocs / limit)) : 1

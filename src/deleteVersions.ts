@@ -2,7 +2,7 @@ import type { DeleteVersions } from 'payload'
 
 import type { DynamoAdapter } from './types.js'
 
-import { castVersionsWhere } from './utilities/castWhere.js'
+import { prepareVersionsWhere } from './utilities/prepareWhere.js'
 import { queryMatching } from './utilities/queryMatching.js'
 import { deleteItems } from './utilities/writeItems.js'
 
@@ -14,7 +14,7 @@ import { deleteItems } from './utilities/writeItems.js'
  */
 export const deleteVersions: DeleteVersions = async function deleteVersions(
   this: DynamoAdapter,
-  { collection, globalSlug, where },
+  { collection, globalSlug, locale, where },
 ) {
   const slug = collection ?? globalSlug
   if (!slug) {
@@ -25,12 +25,13 @@ export const deleteVersions: DeleteVersions = async function deleteVersions(
   const matched = await queryMatching(
     this,
     partition,
-    castVersionsWhere(this, { kind: collection ? 'collection' : 'global', slug }, where),
+    await prepareVersionsWhere(
+      this,
+      { kind: collection ? 'collection' : 'global', slug },
+      where,
+      locale,
+    ),
   )
 
-  await deleteItems(
-    this,
-    partition,
-    matched.map((target) => target['id']),
-  )
+  await deleteItems(this, partition, matched)
 }

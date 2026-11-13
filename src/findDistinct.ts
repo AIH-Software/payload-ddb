@@ -3,8 +3,8 @@ import type { FindDistinct, PaginatedDistinctDocs } from 'payload'
 import type { DynamoAdapter } from './types.js'
 
 import { applySorts } from './utilities/applySorts.js'
-import { castCollectionWhere } from './utilities/castWhere.js'
 import { getByPath } from './utilities/getByPath.js'
+import { prepareCollectionWhere } from './utilities/prepareWhere.js'
 import { queryMatching } from './utilities/queryMatching.js'
 
 /**
@@ -19,9 +19,9 @@ import { queryMatching } from './utilities/queryMatching.js'
  */
 export const findDistinct: FindDistinct = async function findDistinct(
   this: DynamoAdapter,
-  { collection, field, limit = 10, page = 1, sort, where: rawWhere },
+  { collection, field, limit = 10, locale, page = 1, sort, where: rawWhere },
 ) {
-  const where = castCollectionWhere(this, collection, rawWhere)
+  const where = await prepareCollectionWhere(this, collection, rawWhere, locale)
   const matched = await queryMatching(this, this.resolvePartition(collection), where)
 
   const seen = new Set<unknown>()

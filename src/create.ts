@@ -1,11 +1,12 @@
 import type { Create } from 'payload'
 
 import { randomUUID } from 'node:crypto'
-import { ValidationError } from 'payload'
 
 import type { DynamoAdapter } from './types.js'
 
+import { backoff, conflictError, getById, MAX_WRITE_ATTEMPTS } from './utilities/optimistic.js'
 import { projectForCollection } from './utilities/resolveSchema.js'
+import { mustBeUniqueError, rethrowUniqueViolation } from './utilities/writeErrors.js'
 import { isConditionalCheckFailed, putItem } from './utilities/writeItems.js'
 
 export const create: Create = async function create(
@@ -29,30 +30,29 @@ export const create: Create = async function create(
   // layer, so without this any stray request-body key (notoriously the
   // registration form's `confirm-password`) would persist verbatim.
   const projected = projectForCollection(this, collection, item)
+  const partition = this.resolvePartition(collection)
 
-  try {
-    // Insert-only: a plain `PutItem` would replace whatever row already sits
-    // at this id, so a caller-supplied id that collides with an existing doc
-    // would silently destroy it.
-    await putItem(this, this.resolvePartition(collection), projected, { mustNotExist: true })
-  } catch (err) {
-    if (!isConditionalCheckFailed(err)) throw err
-    // Surface the collision the way the Mongo and Postgres adapters surface a
-    // duplicate primary key: a `ValidationError` on `id`, which Payload turns
-    // into a 400 with a field-level message.
-    throw new ValidationError(
-      {
-        collection,
-        errors: [
-          {
-            message: req?.t ? req.t('error:valueMustBeUnique') : 'Value must be unique',
-            path: 'id',
-          },
-        ],
-        ...(req ? { req } : {}),
-      },
-      req?.t,
-    )
+  for (let attempt = 1; ; attempt++) {
+    try {
+      // Insert-only: a plain `PutItem` would replace whatever row already
+      // sits at this id, so a caller-supplied id that collides with an
+      // existing doc would silently destroy it. `unique` adds a guard row per
+      // unique field in the same transaction.
+      await putItem(this, partition, projected, { mustNotExist: true, unique: { collection } })
+      break
+    } catch (err) {
+      rethrowUniqueViolation(err, collection, req)
+      if (!isConditionalCheckFailed(err)) throw err
+
+      // Either the id is taken, or this write collided with a concurrent one
+      // over a unique value. Surface the first the way the Mongo and Postgres
+      // adapters surface a duplicate primary key — a `ValidationError` on
+      // `id` — and retry the second, which resolves to a clean success or a
+      // unique violation.
+      if (await getById(this, partition, id)) throw mustBeUniqueError('id', collection, req)
+      if (attempt >= MAX_WRITE_ATTEMPTS) throw conflictError()
+      await backoff(attempt)
+    }
   }
 
   return returning === false ? (null as never) : projected

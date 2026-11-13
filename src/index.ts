@@ -26,12 +26,15 @@ import { init } from './init.js'
 import { queryDrafts } from './queryDrafts.js'
 import { updateGlobal } from './updateGlobal.js'
 import { updateGlobalVersion } from './updateGlobalVersion.js'
+import { updateJobs } from './updateJobs.js'
 import { updateMany } from './updateMany.js'
 import { updateOne } from './updateOne.js'
 import { updateVersion } from './updateVersion.js'
 import { upsert } from './upsert.js'
 
 export type { Args, DynamoAdapter } from './types.js'
+export { backfillUniqueGuards } from './utilities/backfillUniqueGuards.js'
+export type { UniqueBackfillReport } from './utilities/backfillUniqueGuards.js'
 export { scrubUnknownFields } from './utilities/scrubUnknownFields.js'
 export type { ScrubReport } from './utilities/scrubUnknownFields.js'
 
@@ -65,6 +68,8 @@ export function dynamoAdapter(args: Args = {}): DatabaseAdapterObj<DynamoAdapter
       ownsClient: !args.client,
       tableName,
       ensureTables: args.ensureTables ?? false,
+      // `createDatabaseAdapter` falls back to 'migrations' when this is unset.
+      ...(args.migrationDir ? { migrationDir: args.migrationDir } : {}),
       resolvePartition,
       resolveVersionsPartition,
 
@@ -98,6 +103,7 @@ export function dynamoAdapter(args: Args = {}): DatabaseAdapterObj<DynamoAdapter
       queryDrafts,
       updateGlobal,
       updateGlobalVersion,
+      updateJobs,
       updateMany,
       updateOne,
       updateVersion,

@@ -2,8 +2,9 @@ import type { DeleteMany } from 'payload'
 
 import type { DynamoAdapter } from './types.js'
 
-import { castCollectionWhere } from './utilities/castWhere.js'
+import { prepareCollectionWhere } from './utilities/prepareWhere.js'
 import { queryMatching } from './utilities/queryMatching.js'
+import { hasUniqueFields } from './utilities/uniqueGuards.js'
 import { deleteItems } from './utilities/writeItems.js'
 
 /**
@@ -14,13 +15,15 @@ export const deleteMany: DeleteMany = async function deleteMany(
   this: DynamoAdapter,
   { collection, where: rawWhere },
 ) {
-  const where = castCollectionWhere(this, collection, rawWhere)
+  const where = await prepareCollectionWhere(this, collection, rawWhere)
   const partition = this.resolvePartition(collection)
   const matched = await queryMatching(this, partition, where)
 
   await deleteItems(
     this,
     partition,
-    matched.map((target) => target['id']),
+    matched,
+    // Unique guards are released together with the documents that hold them.
+    hasUniqueFields(this, collection) ? collection : undefined,
   )
 }

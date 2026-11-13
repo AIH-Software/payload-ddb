@@ -1,4 +1,7 @@
+import { APIError } from 'payload'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+
+import type { DynamoAdapter } from '../../src/index.js'
 
 import { initPayloadTest, type TestHandle } from '../__helpers/initPayload.js'
 import { config } from './config.js'
@@ -153,5 +156,25 @@ describe('drafts collection — find / queryDrafts / supplements', () => {
     })
     expect(latest.totalDocs).toBe(1)
     expect(latest.docs[0]?.version?.title).toBe('a-v2')
+  })
+})
+
+describe('version rows — limits', () => {
+  it('rejects a version snapshot over the 400 KB item limit with a clear error', async () => {
+    // Goes through the adapter directly: this is the `TransactWriteItems`
+    // path, where DynamoDB reports the breach differently than a plain put.
+    const adapter = handle.payload.db as DynamoAdapter
+    const now = new Date().toISOString()
+    const attempt = adapter.createVersion({
+      autosave: false,
+      collectionSlug: 'versions-no-drafts',
+      createdAt: now,
+      parent: 'oversized-parent',
+      updatedAt: now,
+      versionData: { title: 'x'.repeat(450_000) } as never,
+    })
+
+    await expect(attempt).rejects.toBeInstanceOf(APIError)
+    await expect(attempt).rejects.toMatchObject({ status: 413 })
   })
 })

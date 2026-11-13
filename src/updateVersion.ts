@@ -1,14 +1,8 @@
 import type { UpdateVersion } from 'payload'
 
-import { GetCommand } from '@aws-sdk/lib-dynamodb'
-
 import type { DynamoAdapter } from './types.js'
 
-import { castVersionsWhere } from './utilities/castWhere.js'
-import { findFirst } from './utilities/findFirst.js'
-import { projectVersionRow } from './utilities/resolveSchema.js'
-import { stripInternalKeys } from './utilities/stripInternalKeys.js'
-import { putItem } from './utilities/writeItems.js'
+import { updateVersionRow } from './utilities/updateVersionRow.js'
 
 /**
  * Read-merge-write against the versions partition. `versionData` is
@@ -26,53 +20,5 @@ export const updateVersion: UpdateVersion = async function updateVersion(
   this: DynamoAdapter,
   args,
 ) {
-  const docClient = this.docClient
-  if (!docClient) {
-    throw new Error('payload-ddb: docClient is not initialized — call connect() first.')
-  }
-
-  const partition = this.resolveVersionsPartition(args.collection)
-
-  let target: null | Record<string, unknown> = null
-
-  if (args.id !== undefined && args.id !== null) {
-    const result = await docClient.send(
-      new GetCommand({
-        TableName: this.tableName,
-        Key: { pk: partition, sk: String(args.id) },
-        ConsistentRead: true,
-      }),
-    )
-    target = result.Item ? stripInternalKeys(result.Item) : null
-  } else if (args.where) {
-    target = await findFirst(this, {
-      partition,
-      where: castVersionsWhere(this, { kind: 'collection', slug: args.collection }, args.where),
-    })
-  }
-
-  if (!target) {
-    return null as never
-  }
-
-  const merged: Record<string, unknown> = {
-    ...target,
-    ...args.versionData,
-    id: target['id'],
-  }
-  // Project both the version-row metadata layer and the inner `version`
-  // snapshot. Catches stray keys at either layer plus stale leaks already
-  // persisted on the target.
-  const projected = projectVersionRow(
-    this,
-    { kind: 'collection', slug: args.collection },
-    merged,
-  )
-
-  await putItem(this, partition, projected)
-
-  if (args.returning === false) {
-    return null as never
-  }
-  return projected as never
+  return updateVersionRow(this, { kind: 'collection', slug: args.collection }, args) as never
 }

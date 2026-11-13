@@ -88,6 +88,11 @@ value in the same physical table.
 - **Sort key is always String.** Number-typed collection ids are coerced to
   strings for `sk` while the original numeric `id` attribute is preserved on
   the row.
+- **Revision counter.** Every row also carries `_rev`, bumped on each write
+  and stripped on read. Updates are conditional on it, so two writers can't
+  silently overwrite each other.
+- **Unique guards:** `pk = "<slug>#unique#<field path>"`, `sk = "<value>"`,
+  one small row per value of a `unique: true` field. See *Unique fields*.
 - **No GSIs or LSIs in v2.** Per-collection reads are `Query`s scoped by `pk`;
   predicates beyond `pk` get pushed to `FilterExpression` (DynamoDB still
   reads every row in the partition before filtering).
@@ -97,26 +102,88 @@ value in the same physical table.
 All `BaseDatabaseAdapter` methods: `create`, `find`, `findOne`, `findDistinct`,
 `count`, `updateOne`, `updateMany`, `deleteOne`, `deleteMany`, `upsert`,
 `createGlobal`/`findGlobal`/`updateGlobal`, the five collection version methods,
-the four global version methods, and `queryDrafts`.
+the four global version methods, `queryDrafts`, and `updateJobs`.
 
-Supported `where` operators: `equals`, `not_equals`, `greater_than`,
-`greater_than_equal`, `less_than`, `less_than_equal`, `in`, `not_in`, `exists`,
-`like`, plus `and` / `or` composition. Anything else throws by design so
-coverage gaps surface loudly. `like` is case-insensitive and evaluated in JS
-(DynamoDB's `contains()` is case-sensitive, so the adapter doesn't push it
-down). `exists` treats a field stored as `null` the same as a missing one, and
-for text-like fields an empty string as well.
+### Queries
 
-Operands are cast to the field's stored type before a query runs, so filters
-sent as strings (REST query strings, admin list filters) behave: numeric
-strings on `number` fields, `'true'`/`'false'` on `checkbox` fields, date
-strings on `date` fields, ids on relationships to numeric-id collections, and
-comma-delimited lists for `in` / `not_in`. DynamoDB compares strictly by type,
-so an operand the adapter can't cast (an unknown path, or one that continues
-through a relationship or array) is compared as given.
+Every Payload `where` operator is supported: `equals`, `not_equals`,
+`greater_than`, `greater_than_equal`, `less_than`, `less_than_equal`, `in`,
+`not_in`, `all`, `exists`, `like`, `not_like`, `contains`, `near`, `within`,
+`intersects`, plus `and` / `or` composition.
 
-`create` is insert-only: an id that is already taken is rejected with a
-`ValidationError` on `id` rather than replacing the existing document.
+- **Pushdown where possible, JS for the rest.** Clauses DynamoDB can express
+  go into a `FilterExpression`. The others — the case-insensitive text
+  operators (`like`, `not_like`, `contains`), `all`, the geo operators, and
+  any path that runs through a list — are evaluated in JS on the rows that
+  come back. A `where` that mixes both kinds still narrows the read
+  server-side.
+- **Lists behave as in MongoDB.** A `hasMany` field, an `array` or `blocks`
+  field, or a list inside `json` is transparent in a path: `tags equals 'x'`
+  matches when any element is `'x'`, `items.label equals 'x'` when any row
+  has that label. Negative operators hold only when no element matches.
+- **Relationship paths.** `author.name equals 'Ada'` is resolved by querying
+  the related collection and filtering on the ids it returns; multi-hop paths
+  work the same way.
+- **Localized fields.** With localization enabled, filters and sorts on a
+  localized field address the request's locale (`title` → `title.en`), or the
+  locale written into the path.
+- **Operand casting.** Operands are cast to the field's stored type, so
+  filters sent as strings (REST query strings, admin list filters) behave:
+  numeric strings on `number` fields, `'true'`/`'false'` on `checkbox` fields,
+  date strings on `date` fields, ids on relationships to numeric-id
+  collections, and comma-delimited lists for `in` / `not_in` / `all`.
+  DynamoDB compares strictly by type, so an operand the adapter can't cast
+  (an unknown path) is compared as given.
+- **`exists`** treats a field stored as `null` the same as a missing one, and
+  for text-like fields an empty string as well.
+- **Geo operators** work on `point` fields. Distances are great-circle
+  metres; polygon tests are planar.
+
+### Join fields
+
+`join` fields are resolved for `find`, `findByID` and draft queries: one query
+per target collection for all returned documents, grouped in memory, with
+`limit`, `page`, `sort`, `where` and `count` applied per parent document.
+Polymorphic joins (`collection: [...]`) return `{ relationTo, value }` entries.
+Joined documents are read from the target's published rows.
+
+### Write guarantees
+
+- **`create` is insert-only.** An id that is already taken is rejected with a
+  `ValidationError` on `id` rather than replacing the existing document.
+- **No lost updates.** Updates are read-merge-write, conditional on the row's
+  revision. If another writer gets in first, the patch is re-applied to the
+  fresh row, so concurrent updates to different fields both land.
+- **Jobs are claimed once.** `updateJobs` uses the same check, so two workers
+  polling the queue can't both take the same job.
+- **Bulk writes are bounded.** `updateMany`, `deleteMany` and `deleteVersions`
+  keep at most 25 requests in flight.
+- **Oversized documents fail clearly.** DynamoDB caps an item at 400 KB;
+  exceeding it raises a 413 naming the document instead of a bare
+  `ValidationException`.
+
+### Unique fields
+
+`unique: true` is enforced for scalar fields at the top level or inside groups
+and named tabs, including localized fields (per locale) and an auth
+collection's `email` / `username`. Each value is claimed by a guard row
+written in the same transaction as the document, so a duplicate is rejected
+with a `ValidationError` on the field — also under concurrent writes. Blank
+values (`null`, `''`) are not guarded. Unique fields inside arrays or blocks,
+and `hasMany` fields, are not enforced.
+
+Writes to a collection with unique fields are transactional and cost twice the
+write units; collections without them are unaffected.
+
+Documents written before this was enforced have no guards until they are next
+saved. To cover them in one pass:
+
+```ts
+import { backfillUniqueGuards } from '@aih-software/payload-ddb'
+
+const report = await backfillUniqueGuards(payload)
+// report.collections[slug].conflicts lists pre-existing duplicates
+```
 
 ## Known limits / future work
 
@@ -130,6 +197,13 @@ through a relationship or array) is compared as given.
   commit/rollback do nothing. Per-method atomicity (e.g. `createVersion`'s
   flip+put) uses DynamoDB `TransactWriteItems` already; full Payload-context
   transaction buffering across multiple adapter calls is its own milestone.
+- **Filters cost a partition read.** Clauses evaluated in JS, relationship
+  paths and joins all read the partitions involved in full (a relationship
+  path or join adds one read of the related collection). Fine at CMS scale;
+  the GSI milestone is what removes it.
+- **Joins don't see unpublished drafts** of the joined collection.
+- **`locale: 'all'`** in a filter or sort falls back to the default locale.
+- **Items are limited to 400 KB**, including a version row's full snapshot.
 
 ## Development
 

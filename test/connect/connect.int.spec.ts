@@ -1,7 +1,9 @@
+import type { Payload } from 'payload'
+
 import { DescribeTableCommand, type DynamoDBClient } from '@aws-sdk/client-dynamodb'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import type { DynamoAdapter } from '../../src/index.js'
+import { type DynamoAdapter, dynamoAdapter } from '../../src/index.js'
 
 import { ensureTable } from '../../src/utilities/ensureTable.js'
 import { initPayloadTest, type TestHandle } from '../__helpers/initPayload.js'
@@ -59,5 +61,20 @@ describe('connect / lifecycle', () => {
       id: created.id,
     })
     expect(found).toMatchObject({ name: 'hello', value: 1 })
+  })
+})
+
+describe('adapter options', () => {
+  // `init` only assembles the adapter object — it doesn't touch the database
+  // — so a bare factory call is enough to see what an option resolves to.
+  const resolve = (args: Parameters<typeof dynamoAdapter>[0]) =>
+    dynamoAdapter(args).init({ payload: {} as Payload })
+
+  it('passes migrationDir through to the adapter', () => {
+    expect(resolve({ migrationDir: 'db/migrations' }).migrationDir).toBe('db/migrations')
+  })
+
+  it('falls back to the default migrationDir when none is given', () => {
+    expect(resolve({}).migrationDir).toBe('migrations')
   })
 })

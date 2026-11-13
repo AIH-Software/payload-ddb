@@ -2,9 +2,10 @@ import type { FindOne } from 'payload'
 
 import type { DynamoAdapter } from './types.js'
 
-import { castCollectionWhere } from './utilities/castWhere.js'
 import { collectionHasDrafts, fetchDraftsOnlySupplements } from './utilities/draftsFallback.js'
 import { findFirst } from './utilities/findFirst.js'
+import { prepareCollectionWhere } from './utilities/prepareWhere.js'
+import { resolveJoins } from './utilities/resolveJoins.js'
 
 /**
  * Locate one doc in `collection` matching `where`. For drafts-enabled
@@ -14,17 +15,18 @@ import { findFirst } from './utilities/findFirst.js'
  */
 export const findOne: FindOne = async function findOne(
   this: DynamoAdapter,
-  { collection, where: rawWhere },
+  { collection, joins, locale, where: rawWhere },
 ) {
-  const where = castCollectionWhere(this, collection, rawWhere)
+  const where = await prepareCollectionWhere(this, collection, rawWhere, locale)
   const partition = this.resolvePartition(collection)
-  const found = await findFirst(this, { partition, where })
-  if (found) return found as never
 
-  if (collectionHasDrafts(this, collection)) {
+  let doc = await findFirst(this, { partition, where })
+  if (!doc && collectionHasDrafts(this, collection)) {
     const supplements = await fetchDraftsOnlySupplements(this, collection, [], where)
-    if (supplements.length > 0) return supplements[0] as never
+    doc = supplements[0] ?? null
   }
+  if (!doc) return null as never
 
-  return null as never
+  await resolveJoins(this, { collectionSlug: collection, docs: [doc], joins, locale })
+  return doc as never
 }

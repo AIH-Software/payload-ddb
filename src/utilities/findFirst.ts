@@ -1,13 +1,12 @@
 import type { Where } from 'payload'
 
-import { GetCommand, QueryCommand } from '@aws-sdk/lib-dynamodb'
+import { GetCommand } from '@aws-sdk/lib-dynamodb'
 
 import type { DynamoAdapter } from '../types.js'
 
 import { buildFilterExpression } from './buildFilterExpression.js'
 import { matchesWhere } from './matchesWhere.js'
-import { whereHasJsOnlyOperator } from './operators.js'
-import { queryMatching } from './queryMatching.js'
+import { partitionPages } from './queryPartition.js'
 import { stripInternalKeys } from './stripInternalKeys.js'
 import { whereToId } from './whereToId.js'
 
@@ -17,8 +16,9 @@ import { whereToId } from './whereToId.js'
  *
  * Fast path: if `where` is a pure id-equality, do a single `GetItem` with the
  * full composite key.
- * Slow path: paginate `Query` (scoped by `pk = partition`) with
- * `FilterExpression` pushdown and stop on the first matching row in any page.
+ * Slow path: walk the partition with as much of `where` pushed down as
+ * DynamoDB can express, re-check rows with `matchesWhere` when that pushdown
+ * is inexact, and stop on the first match in any page.
  */
 export async function findFirst(
   adapter: DynamoAdapter,
@@ -29,8 +29,8 @@ export async function findFirst(
     throw new Error('payload-ddb: docClient is not initialized — call connect() first.')
   }
 
-  const { partition } = args
-  const id = whereToId(args.where)
+  const { partition, where } = args
+  const id = whereToId(where)
 
   if (id !== null) {
     const result = await docClient.send(
@@ -44,46 +44,15 @@ export async function findFirst(
     return result.Item ? stripInternalKeys(result.Item) : null
   }
 
-  // JS-only operator (e.g. `like`) somewhere in `where` — fetch the partition
-  // and pick the first JS match. Loses the "stop on first hit per page"
-  // optimization but keeps semantics consistent with `queryMatching`.
-  if (whereHasJsOnlyOperator(args.where)) {
-    const all = await queryMatching(adapter, partition, undefined)
-    for (const row of all) {
-      if (matchesWhere(row, args.where)) return row
-    }
-    return null
-  }
-
-  const filter = buildFilterExpression(args.where)
+  const compiled = buildFilterExpression(where)
   // Always-false predicate (e.g. `in: []`) → no document can match.
-  if (filter === null) return null
-  let exclusiveStartKey: Record<string, unknown> | undefined
+  if (compiled.never) return null
 
-  while (true) {
-    const result = await docClient.send(
-      new QueryCommand({
-        TableName: adapter.tableName,
-        KeyConditionExpression: '#pk = :pk',
-        ExpressionAttributeNames: {
-          '#pk': 'pk',
-          ...(filter?.names ?? {}),
-        },
-        ExpressionAttributeValues: {
-          ':pk': partition,
-          ...(filter?.values ?? {}),
-        },
-        ConsistentRead: true,
-        ...(filter ? { FilterExpression: filter.expression } : {}),
-        ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
-      }),
-    )
-    for (const item of result.Items ?? []) {
-      return stripInternalKeys(item)
+  for await (const page of partitionPages(adapter, partition, compiled.filter)) {
+    for (const item of page.items) {
+      const row = stripInternalKeys(item)
+      if (compiled.exact || matchesWhere(row, where)) return row
     }
-    if (!result.LastEvaluatedKey) {
-      return null
-    }
-    exclusiveStartKey = result.LastEvaluatedKey
   }
+  return null
 }

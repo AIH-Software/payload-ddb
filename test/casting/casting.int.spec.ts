@@ -6,7 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
 import type { DynamoAdapter } from '../../src/index.js'
 
-import { castCollectionWhere } from '../../src/utilities/castWhere.js'
+import { prepareCollectionWhere } from '../../src/utilities/prepareWhere.js'
 import { initPayloadTest, type TestHandle } from '../__helpers/initPayload.js'
 import { config } from './config.js'
 
@@ -286,15 +286,15 @@ describe('version and draft queries', () => {
   })
 })
 
-describe('castWhere', () => {
-  it('returns a new where and leaves the caller’s object untouched', () => {
+describe('prepareWhere', () => {
+  it('returns a new where and leaves the caller’s object untouched', async () => {
     const adapter = handle.payload.db as DynamoAdapter
     const where: Where = {
       and: [{ count: { greater_than: '5' } }, { note: { exists: 'false' } }],
     }
     const snapshot = structuredClone(where)
 
-    const cast = castCollectionWhere(adapter, 'things', where)
+    const cast = await prepareCollectionWhere(adapter, 'things', where)
 
     expect(where).toEqual(snapshot)
     expect(cast).toEqual({
@@ -305,19 +305,17 @@ describe('castWhere', () => {
     })
   })
 
-  it('leaves operands alone when it cannot tell what the path points at', () => {
+  it('leaves operands alone when it cannot tell what the path points at', async () => {
     const adapter = handle.payload.db as DynamoAdapter
     const where: Where = {
       // Not a declared field.
       mystery: { equals: '5' },
-      // Continues past a relationship: the type lives in another collection.
-      'author.name': { equals: '5' },
       // A text field keeps numeric-looking strings as strings.
       name: { equals: '5' },
       // Not a number, so nothing to cast it to.
       count: { equals: 'abc' },
     }
 
-    expect(castCollectionWhere(adapter, 'things', where)).toEqual(where)
+    expect(await prepareCollectionWhere(adapter, 'things', where)).toEqual(where)
   })
 })

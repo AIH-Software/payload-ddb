@@ -3,9 +3,10 @@ import type { PaginatedDocs, QueryDrafts, Where } from 'payload'
 import type { DynamoAdapter } from './types.js'
 
 import { applySorts } from './utilities/applySorts.js'
-import { castCollectionWhere } from './utilities/castWhere.js'
 import { matchesWhere } from './utilities/matchesWhere.js'
+import { prepareCollectionWhere, prepareSort } from './utilities/prepareWhere.js'
 import { queryMatching } from './utilities/queryMatching.js'
+import { resolveJoins } from './utilities/resolveJoins.js'
 
 /**
  * Return the latest version of every doc as a paginated, doc-shaped result.
@@ -55,7 +56,7 @@ function stripVersionPrefix(where: Where | null | undefined): Where | null | und
 
 export const queryDrafts: QueryDrafts = async function queryDrafts(
   this: DynamoAdapter,
-  { collection, limit = 10, page = 1, pagination = true, sort, where },
+  { collection, joins, limit = 10, locale, page = 1, pagination = true, sort, where },
 ) {
   const versionsPartition = this.resolveVersionsPartition(collection)
   const docsPartition = this.resolvePartition(collection)
@@ -90,12 +91,17 @@ export const queryDrafts: QueryDrafts = async function queryDrafts(
   // to the top level above, so those prefixed paths never resolve via
   // getByPath. Strip the leading `version.` from every field key so the
   // in-memory filter matches the projected shape.
-  const normalizedWhere = castCollectionWhere(this, collection, stripVersionPrefix(where) ?? undefined)
+  const normalizedWhere = await prepareCollectionWhere(
+    this,
+    collection,
+    stripVersionPrefix(where) ?? undefined,
+    locale,
+  )
   const matched = normalizedWhere
     ? projected.filter((doc) => matchesWhere(doc, normalizedWhere))
     : projected
 
-  applySorts(matched, sort)
+  applySorts(matched, prepareSort(this, { kind: 'collection', slug: collection }, sort, locale))
 
   const totalDocs = matched.length
   const useLimit = limit > 0
@@ -104,6 +110,7 @@ export const queryDrafts: QueryDrafts = async function queryDrafts(
   const start = useLimit ? (safePage - 1) * limit : 0
   const end = useLimit ? start + limit : totalDocs
   const docs = matched.slice(start, end)
+  await resolveJoins(this, { collectionSlug: collection, docs, joins, locale })
 
   const effectiveLimit = useLimit ? limit : totalDocs
   const totalPages = pagination && useLimit ? Math.max(1, Math.ceil(totalDocs / limit)) : 1

@@ -1,22 +1,32 @@
 import type { Where } from 'payload'
 
+import { matchesIntersects, matchesNear, matchesWithin } from './geo.js'
 import { getByPath } from './getByPath.js'
 import { normalizeForDynamo } from './normalizeForDynamo.js'
-import { SUPPORTED_OPERATORS, unsupportedOperatorError } from './operators.js'
+import { JS_ONLY_MARKER, SUPPORTED_OPERATORS, unsupportedOperatorError } from './operators.js'
 
 /**
  * In-memory predicate that evaluates a Payload `Where` against a fetched item.
- * Used wherever the predicate can't be pushed to DynamoDB: a `where` that
- * contains a JS-only operator (`like`), and rows that only take their doc
- * shape after projection (drafts supplements, `queryDrafts`).
+ * This is the adapter's reference evaluator: `buildFilterExpression` pushes
+ * down whatever part of a `where` DynamoDB can express, and every row that
+ * comes back from an inexact pushdown is re-checked here. It also runs alone
+ * for rows that only take their doc shape after projection (drafts
+ * supplements, `queryDrafts`).
  *
- * Must return the same rows `buildFilterExpression` would for the same
- * `where` — callers can't tell which evaluator a query takes. The operator
- * set is shared via `operators.ts`; `test/parity` pins the semantics.
+ * Where a clause can be evaluated by both, the two must return the same rows
+ * — `test/parity` pins that.
+ *
+ * Paths follow MongoDB's array semantics, which is what Payload's query
+ * language assumes: an array anywhere along a path is transparent, so
+ * `tags equals 'x'` matches a `hasMany` value containing `'x'` and
+ * `items.label equals 'x'` matches when any item has that label. A negative
+ * operator (`not_equals`, `not_in`, `not_like`) holds only when *no* element
+ * matches its positive form.
+ *
  * Throws on any unsupported operator so we surface coverage gaps instead of
  * silently returning wrong results.
  */
-export function matchesWhere(item: Record<string, unknown>, where: Where | undefined): boolean {
+export function matchesWhere(item: Record<string, unknown>, where: undefined | Where): boolean {
   if (!where) {
     return true
   }
@@ -47,15 +57,24 @@ export function matchesWhere(item: Record<string, unknown>, where: Where | undef
       continue
     }
 
-    const fieldValue = getByPath(item, key)
     const operators = raw as Record<string, unknown>
+    let candidates: undefined | unknown[]
 
     for (const [operator, expected] of Object.entries(operators)) {
+      if (operator === JS_ONLY_MARKER) continue
       if (!SUPPORTED_OPERATORS.has(operator)) {
         throw unsupportedOperatorError(operator, key)
       }
 
-      if (!evaluate(fieldValue, operator, expected)) {
+      // Geometry reads the stored point whole — `[lng, lat]` is a value, not
+      // a list of candidates.
+      if (operator === 'near' || operator === 'within' || operator === 'intersects') {
+        if (!evaluateGeo(getByPath(item, key), operator, expected)) return false
+        continue
+      }
+
+      candidates ??= candidatesAt(item, key)
+      if (!evaluate(candidates, operator, expected)) {
         return false
       }
     }
@@ -64,42 +83,119 @@ export function matchesWhere(item: Record<string, unknown>, where: Where | undef
   return true
 }
 
-function evaluate(actual: unknown, operator: string, rawExpected: unknown): boolean {
+/**
+ * Every value a dotted path can reach in `source`, treating arrays as
+ * transparent. A path that ends on an array yields the array itself (so an
+ * array operand can match it whole, and `exists` sees an empty list as a
+ * value) followed by each of its elements. A path that reaches nothing
+ * yields no candidates.
+ */
+export function candidatesAt(source: unknown, path: string): unknown[] {
+  const out: unknown[] = []
+  collect(source, path.split('.'), 0, out)
+  return out
+}
+
+function collect(value: unknown, segments: string[], index: number, out: unknown[]): void {
+  if (index === segments.length) {
+    if (value === undefined) return
+    out.push(value)
+    if (Array.isArray(value)) {
+      for (const member of value) {
+        if (member !== undefined) out.push(member)
+      }
+    }
+    return
+  }
+  if (Array.isArray(value)) {
+    for (const member of value) collect(member, segments, index, out)
+    return
+  }
+  if (value === null || typeof value !== 'object') return
+  collect((value as Record<string, unknown>)[segments[index]!], segments, index + 1, out)
+}
+
+function evaluateGeo(value: unknown, operator: string, expected: unknown): boolean {
+  switch (operator) {
+    case 'intersects':
+      return matchesIntersects(value, expected)
+    case 'near':
+      return matchesNear(value, expected)
+    default:
+      return matchesWithin(value, expected)
+  }
+}
+
+function evaluate(candidates: unknown[], operator: string, rawExpected: unknown): boolean {
   // Coerce the operand exactly as `buildFilterExpression` coerces its
   // expression values (today: `Date` → ISO string, including inside `in` /
   // `not_in` lists). Rows hold ISO strings, so comparing them against a raw
   // `Date` would never be equal and would order by `Date#toString()` text.
   const expected = normalizeForDynamo(rawExpected)
+  const some = (test: (candidate: unknown) => boolean) => candidates.some(test)
+  const hasValue = (candidate: unknown) => candidate !== undefined && candidate !== null
 
   switch (operator) {
+    case 'all':
+      return (
+        Array.isArray(expected) &&
+        expected.every((member) => some((candidate) => valuesEqual(candidate, member)))
+      )
+    case 'contains':
+      return asList(expected).some((needle) => some((candidate) => containsText(candidate, needle)))
     case 'equals':
-      return valuesEqual(actual, expected)
-    case 'not_equals':
-      return !valuesEqual(actual, expected)
-    case 'greater_than':
-      return compareLoose(actual, expected) > 0
-    case 'greater_than_equal':
-      return compareLoose(actual, expected) >= 0
-    case 'less_than':
-      return compareLoose(actual, expected) < 0
-    case 'less_than_equal':
-      return compareLoose(actual, expected) <= 0
+      return some((candidate) => valuesEqual(candidate, expected))
     case 'exists':
-      return expected ? actual !== undefined && actual !== null : actual === undefined || actual === null
+      return expected ? some(hasValue) : !some(hasValue)
+    case 'greater_than':
+      return some((candidate) => compareLoose(candidate, expected) > 0)
+    case 'greater_than_equal':
+      return some((candidate) => compareLoose(candidate, expected) >= 0)
     case 'in':
-      return Array.isArray(expected) && expected.some((member) => valuesEqual(actual, member))
+      return (
+        Array.isArray(expected) &&
+        expected.some((member) => some((candidate) => valuesEqual(candidate, member)))
+      )
+    case 'less_than':
+      return some((candidate) => compareLoose(candidate, expected) < 0)
+    case 'less_than_equal':
+      return some((candidate) => compareLoose(candidate, expected) <= 0)
+    case 'like':
+      return isLike(candidates, expected)
+    case 'not_equals':
+      return !some((candidate) => valuesEqual(candidate, expected))
     case 'not_in':
-      return Array.isArray(expected) && !expected.some((member) => valuesEqual(actual, member))
-    case 'like': {
-      // Empty needle means "no constraint" — mirrors SQL `LIKE '%%'` and what
-      // Payload's admin search produces when the search input is cleared.
-      if (typeof expected !== 'string' || expected === '') return true
-      if (typeof actual !== 'string') return false
-      return actual.toLowerCase().includes(expected.toLowerCase())
-    }
+      return (
+        Array.isArray(expected) &&
+        !expected.some((member) => some((candidate) => valuesEqual(candidate, member)))
+      )
+    case 'not_like':
+      return !isLike(candidates, expected)
     default:
       return false
   }
+}
+
+const asList = (value: unknown): unknown[] => (Array.isArray(value) ? value : [value])
+
+function isLike(candidates: unknown[], expected: unknown): boolean {
+  // Empty needle means "no constraint" — mirrors SQL `LIKE '%%'` and what
+  // Payload's admin search produces when the search input is cleared.
+  if (typeof expected !== 'string' || expected === '') return true
+  const needle = expected.toLowerCase()
+  return candidates.some(
+    (candidate) => typeof candidate === 'string' && candidate.toLowerCase().includes(needle),
+  )
+}
+
+/**
+ * `contains`: case-insensitive substring, over text and numbers (a `hasMany`
+ * number field is searched by its digits, as the Mongo adapter does).
+ */
+function containsText(candidate: unknown, needle: unknown): boolean {
+  if (typeof needle !== 'string' && typeof needle !== 'number') return false
+  if (typeof candidate !== 'string' && typeof candidate !== 'number') return false
+  return String(candidate).toLowerCase().includes(String(needle).toLowerCase())
 }
 
 /**

@@ -1,9 +1,11 @@
 import { GetCommand } from '@aws-sdk/lib-dynamodb'
-import { ValidationError } from 'payload'
+import { APIError, ValidationError } from 'payload'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import type { DynamoAdapter } from '../../src/index.js'
 
+import { mapWithConcurrency } from '../../src/utilities/mapWithConcurrency.js'
+import { WRITE_CONCURRENCY } from '../../src/utilities/writeItems.js'
 import { initPayloadTest, type TestHandle } from '../__helpers/initPayload.js'
 import { config } from './config.js'
 
@@ -260,5 +262,78 @@ describe('CRUD — pagination', () => {
       sort: '-priority',
     })
     expect(desc.docs.map((d) => d.priority)).toEqual([24, 23, 22, 21, 20])
+  })
+})
+
+describe('CRUD — limits', () => {
+  it('rejects a document over the 400 KB item limit with a clear, public error', async () => {
+    // Straight to the adapter: Payload's own text validation would reject a
+    // value this long before the write ever reached DynamoDB.
+    const adapter = handle.payload.db as DynamoAdapter
+    const attempt = adapter.create({
+      collection: 'posts',
+      data: { title: 'x'.repeat(450_000) },
+    })
+
+    await expect(attempt).rejects.toBeInstanceOf(APIError)
+    await expect(attempt).rejects.toMatchObject({
+      isPublic: true,
+      message: expect.stringContaining('400 KB'),
+      status: 413,
+    })
+  })
+
+  it('bulk update and delete cover every match, beyond one concurrency window', async () => {
+    const adapter = handle.payload.db as DynamoAdapter
+    const total = WRITE_CONCURRENCY * 2 + 5
+    await Promise.all(
+      Array.from({ length: total }, (_, index) =>
+        adapter.create({ collection: 'posts', data: { title: `bulk-${index}`, priority: 1 } }),
+      ),
+    )
+
+    const updated = await adapter.updateMany({
+      collection: 'posts',
+      data: { priority: 2 },
+      where: { priority: { equals: 1 } },
+    })
+    expect(updated).toHaveLength(total)
+    expect((await adapter.count({ collection: 'posts', where: { priority: { equals: 2 } } })).totalDocs).toBe(
+      total,
+    )
+
+    await adapter.deleteMany({ collection: 'posts', where: { priority: { equals: 2 } } })
+    expect((await adapter.count({ collection: 'posts' })).totalDocs).toBe(0)
+  })
+})
+
+describe('mapWithConcurrency', () => {
+  it('keeps input order and never runs more than `limit` calls at once', async () => {
+    let inFlight = 0
+    let peak = 0
+    const results = await mapWithConcurrency([5, 1, 4, 2, 3, 0, 6], 3, async (value) => {
+      inFlight++
+      peak = Math.max(peak, inFlight)
+      // Later items finish sooner, so order has to come from the index.
+      await new Promise((resolve) => setTimeout(resolve, value))
+      inFlight--
+      return value * 10
+    })
+
+    expect(results).toEqual([50, 10, 40, 20, 30, 0, 60])
+    expect(peak).toBe(3)
+  })
+
+  it('rejects when a call fails and starts no further work', async () => {
+    const started: number[] = []
+    const attempt = mapWithConcurrency([0, 1, 2, 3, 4, 5], 2, async (value) => {
+      started.push(value)
+      if (value === 1) throw new Error('boom')
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      return value
+    })
+
+    await expect(attempt).rejects.toThrow('boom')
+    expect(started.length).toBeLessThan(6)
   })
 })

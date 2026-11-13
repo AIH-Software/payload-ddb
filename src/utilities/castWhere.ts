@@ -1,27 +1,23 @@
 import type { FlattenedField, Where } from 'payload'
 
-import {
-  buildVersionCollectionFields,
-  buildVersionGlobalFields,
-  createArrayFromCommaDelineated,
-} from 'payload'
+import { createArrayFromCommaDelineated } from 'payload'
+import { fieldShouldBeLocalized } from 'payload/shared'
 
-import type { DynamoAdapter } from '../types.js'
+import { JS_ONLY_MARKER } from './operators.js'
 
 /**
- * Coerce the operands of a Payload `Where` to the types the targeted fields
- * actually store, before either evaluator (`buildFilterExpression` or
- * `matchesWhere`) sees it.
+ * Rewrite a Payload `Where` into the terms the stored rows are in, before
+ * either evaluator (`buildFilterExpression` or `matchesWhere`) sees it. Three
+ * things happen per clause, all driven by the field the path points at:
  *
- * Why this exists: operands routinely arrive as strings. The REST API parses
- * `?where[price][greater_than]=10` with `qs`, which yields `"10"`; the admin
- * list filters go the same way. Mongoose and SQL drivers quietly coerce those
- * against their schema. DynamoDB has no schema and compares strictly by type
- * — `"10"` never equals or orders against the number `10` — so without this
- * pass such a filter matches nothing and reports no error.
- *
- * The rules follow Payload's Mongo and Postgres adapters
- * (`sanitizeQueryValue`), minus their database-specific quirks:
+ * **Operands are cast** to the type the field stores. They routinely arrive
+ * as strings: the REST API parses `?where[price][greater_than]=10` with
+ * `qs`, which yields `"10"`, and the admin list filters go the same way.
+ * Mongoose and SQL drivers quietly coerce those against their schema.
+ * DynamoDB has no schema and compares strictly by type — `"10"` never equals
+ * or orders against the number `10` — so without this such a filter matches
+ * nothing and reports no error. The rules follow Payload's Mongo and
+ * Postgres adapters (`sanitizeQueryValue`), minus their database quirks:
  *
  *  - `checkbox`: `'true'` / `'false'` (any case) → boolean.
  *  - `number`: numeric strings → number.
@@ -32,19 +28,37 @@ import type { DynamoAdapter } from '../types.js'
  *    related collection has numeric ids, including inside a polymorphic
  *    `{ relationTo, value }` operand.
  *  - `id`: → number when this collection has numeric ids.
- *  - `in` / `not_in`: a comma-delimited string → array, each member cast.
+ *  - `in` / `not_in` / `all`: a comma-delimited string → array, each member
+ *    cast.
  *  - `exists`: operand → boolean (`'false'` is a truthy string otherwise),
  *    and for fields that can hold text, an empty string counts as absent —
  *    that's what the admin UI leaves behind when a text input is cleared.
+ *  - `contains` on a `hasMany` select or a relationship means "has this
+ *    value", so it becomes `equals` / `in`.
+ *
+ * **Localized paths get their locale key.** A localized field is stored as
+ * `{ en: …, es: … }`, so `title` becomes `title.en` for the request's locale
+ * (unless the caller already wrote a locale into the path).
+ *
+ * **Paths DynamoDB can't address are marked** with `JS_ONLY_MARKER`: any that
+ * run through an `array` / `blocks` field or a `hasMany` value, or into a
+ * field whose inner shape the schema doesn't describe (`json`, rich text).
+ * The pushdown skips those clauses; `matchesWhere` evaluates them with
+ * any-element semantics.
  *
  * Anything it can't confidently cast is left exactly as given: an unknown
- * path, a path that continues past a leaf field (relationship traversal, a
- * locale key), an unparseable value. The evaluators then treat it as before.
+ * path, a path that continues past a leaf field, an unparseable value.
  *
  * Returns a new `Where`; the caller's object is never mutated.
  */
 
 export type IdType = 'number' | 'text'
+
+export type Localization = {
+  /** Locale to address when a path doesn't name one. */
+  locale: string
+  localeCodes: string[]
+}
 
 export type CastContext = {
   /** Flattened fields of the entity the `where` targets. */
@@ -53,15 +67,20 @@ export type CastContext = {
   idType: IdType
   /** Id type of another collection, for relationship operands. */
   idTypeOf: (collectionSlug: string) => IdType
+  /** Set only when the Payload config has localization enabled. */
+  localization?: Localization
 }
 
 /** Field types whose stored value can be an empty string. */
 const CAN_HOLD_EMPTY_STRING = new Set(['code', 'email', 'radio', 'select', 'text', 'textarea'])
 
-/** Operators whose operand is a search needle or a flag, not a field value. */
-const UNCAST_OPERATORS = new Set(['exists', 'like'])
+/**
+ * Operators whose operand is a search needle, a flag or a geometry — not a
+ * value of the field's own type.
+ */
+const UNCAST_OPERATORS = new Set(['intersects', 'like', 'near', 'not_like', 'within'])
 
-const LIST_OPERATORS = new Set(['in', 'not_in'])
+const LIST_OPERATORS = new Set(['all', 'in', 'not_in'])
 
 export function castWhere(where: undefined | Where, ctx: CastContext): undefined | Where {
   if (!where || typeof where !== 'object') return where
@@ -83,8 +102,15 @@ export function castWhere(where: undefined | Where, ctx: CastContext): undefined
       continue
     }
 
-    const field = resolveField(ctx.fields, key)
+    const { field, multi, path } = resolvePath(ctx.fields, key, ctx.localization)
     const cast = casterFor(key, field, ctx)
+    /** A clause on this path, carrying the JS-only marker when it needs one. */
+    const clause = (operators: Record<string, unknown>): Where => ({
+      [path]: (multi ? { ...operators, [JS_ONLY_MARKER]: true } : operators) as Where[string],
+    })
+    const castList = (operand: unknown): unknown =>
+      Array.isArray(operand) ? operand.map(cast) : cast(operand)
+
     const operators: Record<string, unknown> = {}
 
     for (const [operator, operand] of Object.entries(raw as Record<string, unknown>)) {
@@ -95,10 +121,22 @@ export function castWhere(where: undefined | Where, ctx: CastContext): undefined
         } else if (wanted) {
           // Present = has a value, and that value isn't the empty string.
           operators['exists'] = true
-          extra.push({ [key]: { not_equals: '' } })
+          extra.push(clause({ not_equals: '' }))
         } else {
           // Absent = no value, or an empty string.
-          extra.push({ or: [{ [key]: { exists: false } }, { [key]: { equals: '' } }] })
+          extra.push({ or: [clause({ exists: false }), clause({ equals: '' })] })
+        }
+        continue
+      }
+
+      if (operator === 'contains') {
+        if (field && holdsDiscreteValues(field)) {
+          // "Contains" an option or an id means "has it" — there's no
+          // substring to search.
+          const value = castList(operand)
+          extra.push(clause(Array.isArray(value) ? { in: value } : { equals: value }))
+        } else {
+          operators['contains'] = operand
         }
         continue
       }
@@ -108,15 +146,15 @@ export function castWhere(where: undefined | Where, ctx: CastContext): undefined
         continue
       }
 
-      const value =
+      operators[operator] = castList(
         LIST_OPERATORS.has(operator) && typeof operand === 'string'
           ? createArrayFromCommaDelineated(operand)
-          : operand
-      operators[operator] = Array.isArray(value) ? value.map(cast) : cast(value)
+          : operand,
+      )
     }
 
     if (Object.keys(operators).length > 0) {
-      out[key] = operators as Where[string]
+      Object.assign(out, clause(operators))
     }
   }
 
@@ -130,25 +168,91 @@ export function castWhere(where: undefined | Where, ctx: CastContext): undefined
   return out
 }
 
-/**
- * Walk a dotted path through groups, named tabs and arrays to the field it
- * names. Returns `null` when the path leaves the declared schema — including
- * when it continues past a field with no sub-fields (e.g. `author.name`
- * through a relationship), where guessing a type would be wrong.
- */
-function resolveField(fields: FlattenedField[], path: string): FlattenedField | null {
-  const segments = path.split('.')
-  let current = fields
+export type ResolvedPath = {
+  /** The field the path ends on, when the schema describes it. */
+  field: FlattenedField | null
+  /** True when DynamoDB can't address the path as one value. */
+  multi: boolean
+  /** The path as stored: locale keys inserted after localized segments. */
+  path: string
+}
 
-  for (const [index, segment] of segments.entries()) {
-    const field = current.find((candidate) => candidate.name === segment)
-    if (!field) return null
-    if (index === segments.length - 1) return field
-    if (!('flattenedFields' in field)) return null
-    current = field.flattenedFields
+/**
+ * Walk a dotted path through groups, named tabs, arrays and blocks to the
+ * field it names, noting on the way whether it crosses anything list-shaped
+ * and where locale keys belong.
+ *
+ * `field` is `null` when the path leaves the declared schema — an unknown
+ * name, or a path that continues past a field with no sub-fields (a
+ * polymorphic relationship's `.value`, a key inside `json`), where guessing
+ * a type would be wrong.
+ */
+export function resolvePath(
+  fields: FlattenedField[],
+  path: string,
+  localization?: Localization,
+): ResolvedPath {
+  const segments = path.split('.')
+  const stored: string[] = []
+  let current: FlattenedField[] | null = fields
+  let field: FlattenedField | null = null
+  let multi = false
+  let parentIsLocalized = false
+
+  for (let index = 0; index < segments.length; index++) {
+    const segment = segments[index]!
+    stored.push(segment)
+
+    const found: FlattenedField | undefined = current?.find(
+      (candidate) => candidate.name === segment,
+    )
+    if (!found) {
+      // Off the schema from here on; copy the rest of the path as given.
+      current = null
+      field = null
+      continue
+    }
+    field = found
+
+    if (localization && fieldShouldBeLocalized({ field: found, parentIsLocalized })) {
+      const next = segments[index + 1]
+      if (next !== undefined && localization.localeCodes.includes(next)) {
+        // The caller named a locale explicitly — keep theirs.
+        stored.push(next)
+        index++
+      } else {
+        stored.push(localization.locale)
+      }
+      parentIsLocalized = true
+    }
+
+    if (found.type === 'array' || found.type === 'blocks' || ('hasMany' in found && found.hasMany)) {
+      multi = true
+    }
+
+    if (index === segments.length - 1) break
+
+    if ('flattenedFields' in found) {
+      current = found.flattenedFields
+    } else if (found.type === 'blocks') {
+      // Block rows are stored side by side in one list, so a sub-field name
+      // is looked up across every block type.
+      current = found.blocks.flatMap((block) => block.flattenedFields)
+    } else {
+      current = null
+      // Relationships keep a known shape below them (`.value`, `.relationTo`).
+      // Anything else — `json`, rich text — may hold lists we can't see.
+      if (found.type !== 'relationship' && found.type !== 'upload') multi = true
+    }
   }
 
-  return null
+  return { field, multi, path: stored.join('.') }
+}
+
+/** `hasMany` selects, and relationships of either arity, hold whole values to match — not text to search. */
+function holdsDiscreteValues(field: FlattenedField): boolean {
+  if (field.type === 'relationship' || field.type === 'upload') return true
+  return field.type === 'select' && Boolean(field.hasMany)
 }
 
 function holdsEmptyString(field: FlattenedField): boolean {
@@ -240,95 +344,4 @@ function isRelationValue(value: unknown): value is { relationTo: string; value: 
     typeof (value as { relationTo?: unknown }).relationTo === 'string' &&
     'value' in value
   )
-}
-
-// ---------------------------------------------------------------------------
-// Adapter-facing entry points. One per kind of partition a `where` can target.
-// Each falls back to returning `where` untouched when the slug isn't in the
-// config — same "skip, don't kill the operation" stance as `resolveSchema`.
-// ---------------------------------------------------------------------------
-
-function idTypeOf(adapter: DynamoAdapter, collectionSlug: string): IdType {
-  return adapter.payload?.collections?.[collectionSlug]?.customIDType ?? adapter.defaultIDType
-}
-
-/** `where` in document terms, against a collection's main partition. */
-export function castCollectionWhere(
-  adapter: DynamoAdapter,
-  slug: string,
-  where: undefined | Where,
-): undefined | Where {
-  const fields = adapter.payload?.collections?.[slug]?.config.flattenedFields
-  if (!where || !fields) return where
-  return castWhere(where, {
-    fields,
-    idType: idTypeOf(adapter, slug),
-    idTypeOf: (related) => idTypeOf(adapter, related),
-  })
-}
-
-/** `where` against a global's singleton row. */
-export function castGlobalWhere(
-  adapter: DynamoAdapter,
-  slug: string,
-  where: undefined | Where,
-): undefined | Where {
-  const fields = adapter.payload?.config?.globals?.find((g) => g.slug === slug)?.flattenedFields
-  if (!where || !fields) return where
-  return castWhere(where, {
-    fields,
-    idType: 'text',
-    idTypeOf: (related) => idTypeOf(adapter, related),
-  })
-}
-
-/**
- * `where` in version-row terms (`parent`, `latest`, `version.<field>`, …),
- * against the versions partition of a collection or global.
- */
-export function castVersionsWhere(
-  adapter: DynamoAdapter,
-  parent: { kind: 'collection' | 'global'; slug: string },
-  where: undefined | Where,
-): undefined | Where {
-  if (!where) return where
-  const fields = versionFields(adapter, parent)
-  if (!fields) return where
-  return castWhere(where, {
-    fields,
-    // Version rows are keyed by ids the adapter generates itself (UUIDs).
-    idType: 'text',
-    idTypeOf: (related) => idTypeOf(adapter, related),
-  })
-}
-
-const versionFieldsCache = new WeakMap<DynamoAdapter, Map<string, FlattenedField[]>>()
-
-function versionFields(
-  adapter: DynamoAdapter,
-  parent: { kind: 'collection' | 'global'; slug: string },
-): FlattenedField[] | null {
-  const config = adapter.payload?.config
-  if (!config) return null
-
-  let cache = versionFieldsCache.get(adapter)
-  if (!cache) {
-    cache = new Map()
-    versionFieldsCache.set(adapter, cache)
-  }
-  const cacheKey = `${parent.kind}:${parent.slug}`
-  const cached = cache.get(cacheKey)
-  if (cached) return cached
-
-  let fields: FlattenedField[] | null = null
-  if (parent.kind === 'collection') {
-    const collection = adapter.payload.collections?.[parent.slug]?.config
-    if (collection) fields = buildVersionCollectionFields(config, collection, true)
-  } else {
-    const global = config.globals?.find((g) => g.slug === parent.slug)
-    if (global) fields = buildVersionGlobalFields(config, global, true)
-  }
-
-  if (fields) cache.set(cacheKey, fields)
-  return fields
 }

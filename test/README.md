@@ -34,6 +34,10 @@ test/
   query/                       # operator coverage + findDistinct
   parity/                      # pushdown vs JS `where` evaluators return the same rows
   casting/                     # string operands (incl. real REST query strings) cast to field types
+  paths/                       # hasMany, arrays, blocks, json and relationship paths; text and geo operators
+  localization/                # filters and sorts on localized fields
+  joins/                       # join fields, incl. hasMany and polymorphic
+  integrity/                   # concurrent updates, job claiming, unique fields and their backfill
   versions/                    # versions, drafts, queryDrafts, drafts-only fallback
   globals/                     # globals + global versions latest invariant
   relationships/               # single, hasMany, polymorphic

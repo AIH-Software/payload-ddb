@@ -3,17 +3,17 @@ import type { FindGlobalVersions, PaginatedDocs } from 'payload'
 import type { DynamoAdapter } from './types.js'
 
 import { applySorts } from './utilities/applySorts.js'
-import { castVersionsWhere } from './utilities/castWhere.js'
+import { prepareSort, prepareVersionsWhere } from './utilities/prepareWhere.js'
 import { queryMatching } from './utilities/queryMatching.js'
 
 export const findGlobalVersions: FindGlobalVersions = async function findGlobalVersions(
   this: DynamoAdapter,
-  { global, limit = 10, page = 1, pagination = true, sort, where: rawWhere },
+  { global, limit = 10, locale, page = 1, pagination = true, sort, where: rawWhere },
 ) {
-  const where = castVersionsWhere(this, { kind: 'global', slug: global }, rawWhere)
+  const where = await prepareVersionsWhere(this, { kind: 'global', slug: global }, rawWhere, locale)
   const partition = this.resolveVersionsPartition(global)
   const matched = await queryMatching(this, partition, where)
-  applySorts(matched, sort)
+  applySorts(matched, prepareSort(this, { kind: 'globalVersions', slug: global }, sort, locale))
 
   const totalDocs = matched.length
   const useLimit = limit > 0

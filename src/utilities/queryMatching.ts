@@ -1,82 +1,43 @@
 import type { Where } from 'payload'
 
-import { QueryCommand } from '@aws-sdk/lib-dynamodb'
-
 import type { DynamoAdapter } from '../types.js'
 
 import { buildFilterExpression } from './buildFilterExpression.js'
 import { matchesWhere } from './matchesWhere.js'
-import { whereHasJsOnlyOperator } from './operators.js'
+import { partitionPages } from './queryPartition.js'
 import { stripInternalKeys } from './stripInternalKeys.js'
 
 /**
- * Walk a partition via paginated `Query` (`pk = :partition`), pushing the
- * caller's `where` into `FilterExpression` so non-matching rows are skipped
+ * Walk a partition, pushing as much of the caller's `where` into
+ * `FilterExpression` as DynamoDB can express so non-matching rows are skipped
  * server-side. Returns every matching item materialized in memory — suitable
  * for callers that need the full set (sort, paginate, bulk-mutate).
  *
+ * When the pushed-down filter isn't the whole `where` (a JS-only operator
+ * such as `like`, or a path through an array), each returned row is
+ * re-checked with `matchesWhere`. The expressible clauses still narrow the
+ * read, so a `where` that mixes both kinds no longer pulls the entire
+ * partition over the wire.
+ *
  * Use `findFirst` instead when you only need the first match: that helper
  * stops on the first hit.
- *
- * Cost note: `FilterExpression` reduces network bytes but not RCU
- * consumption. DynamoDB still reads every row in the partition before
- * filtering. The next meaningful optimization is GSIs that mirror specific
- * access patterns (e.g. `email` for auth, `slug` for public collections).
  */
 export async function queryMatching(
   adapter: DynamoAdapter,
   partition: string,
   where: undefined | Where,
 ): Promise<Record<string, unknown>[]> {
-  const docClient = adapter.docClient
-  if (!docClient) {
-    throw new Error('payload-ddb: docClient is not initialized — call connect() first.')
-  }
+  const compiled = buildFilterExpression(where)
+  // Always-false predicate (e.g. `id: { in: [] }` from access control).
+  // Short-circuit so we don't pay for a Query just to return nothing.
+  if (compiled.never) return []
 
-  // When `where` uses an operator we can't faithfully push down (today: `like`,
-  // because Payload's contract is case-insensitive while DynamoDB's
-  // `contains()` isn't), we fetch the whole partition and evaluate in JS.
-  // Recurse with `where = undefined` to reuse the standard pagination loop.
-  if (whereHasJsOnlyOperator(where)) {
-    const all = await queryMatching(adapter, partition, undefined)
-    return all.filter((row) => matchesWhere(row, where))
-  }
-
-  const filter = buildFilterExpression(where)
-  // `null` signals an always-false predicate (e.g. `id: { in: [] }` from
-  // access control). Short-circuit so we don't pay for a Query just to
-  // return nothing.
-  if (filter === null) return []
   const matched: Record<string, unknown>[] = []
-  let exclusiveStartKey: Record<string, unknown> | undefined
-
-  while (true) {
-    const result = await docClient.send(
-      new QueryCommand({
-        TableName: adapter.tableName,
-        KeyConditionExpression: '#pk = :pk',
-        ExpressionAttributeNames: {
-          '#pk': 'pk',
-          ...(filter?.names ?? {}),
-        },
-        ExpressionAttributeValues: {
-          ':pk': partition,
-          ...(filter?.values ?? {}),
-        },
-        // Strong consistency by default — Payload assumes read-after-write
-        // visibility (Mongo/Postgres do), and DynamoDB's default eventual
-        // consistency breaks "create-then-list" flows. 2x RCU but correct.
-        ConsistentRead: true,
-        ...(filter ? { FilterExpression: filter.expression } : {}),
-        ...(exclusiveStartKey ? { ExclusiveStartKey: exclusiveStartKey } : {}),
-      }),
-    )
-    for (const item of result.Items ?? []) {
-      matched.push(stripInternalKeys(item))
+  for await (const page of partitionPages(adapter, partition, compiled.filter)) {
+    for (const item of page.items) {
+      const row = stripInternalKeys(item)
+      if (compiled.exact || matchesWhere(row, where)) matched.push(row)
     }
-    if (!result.LastEvaluatedKey) break
-    exclusiveStartKey = result.LastEvaluatedKey
   }
-
   return matched
 }
