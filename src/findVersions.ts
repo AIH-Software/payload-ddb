@@ -3,6 +3,7 @@ import type { FindVersions, PaginatedDocs } from 'payload'
 import type { DynamoAdapter } from './types.js'
 
 import { applySorts } from './utilities/applySorts.js'
+import { castVersionsWhere } from './utilities/castWhere.js'
 import { queryMatching } from './utilities/queryMatching.js'
 
 /**
@@ -14,8 +15,9 @@ import { queryMatching } from './utilities/queryMatching.js'
  */
 export const findVersions: FindVersions = async function findVersions(
   this: DynamoAdapter,
-  { collection, limit = 10, page = 1, pagination = true, sort, where },
+  { collection, limit = 10, page = 1, pagination = true, sort, where: rawWhere },
 ) {
+  const where = castVersionsWhere(this, { kind: 'collection', slug: collection }, rawWhere)
   const partition = this.resolveVersionsPartition(collection)
   const matched = await queryMatching(this, partition, where)
   applySorts(matched, sort)

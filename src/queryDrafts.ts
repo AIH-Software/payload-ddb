@@ -3,6 +3,7 @@ import type { PaginatedDocs, QueryDrafts, Where } from 'payload'
 import type { DynamoAdapter } from './types.js'
 
 import { applySorts } from './utilities/applySorts.js'
+import { castCollectionWhere } from './utilities/castWhere.js'
 import { matchesWhere } from './utilities/matchesWhere.js'
 import { queryMatching } from './utilities/queryMatching.js'
 
@@ -28,6 +29,11 @@ import { queryMatching } from './utilities/queryMatching.js'
 // transforming e.g. `{ slug: { equals: 'x' } }` → `{ 'version.slug': { equals: 'x' } }`.
 // But we project versionData flat to the top level, so those prefixed paths
 // never resolve. Strip the leading `version.` to match the projected shape.
+//
+// The same core rewrite turns a doc-level `id` filter into `parent` (the
+// version row's pointer to its doc). The projected docs carry that value as
+// `id` again, so map it back — otherwise an `id` filter on a drafts query
+// tests a `parent` key that no projected doc has, and matches nothing.
 function stripVersionPrefix(where: Where | null | undefined): Where | null | undefined {
   if (!where || typeof where !== 'object') return where
   const result: Where = {}
@@ -36,8 +42,12 @@ function stripVersionPrefix(where: Where | null | undefined): Where | null | und
       if (Array.isArray(value)) {
         result[key] = value.map((sub) => stripVersionPrefix(sub as Where)).filter(Boolean) as Where[]
       }
+    } else if (key.startsWith('version.')) {
+      // Checked first: a doc field that is itself named `parent` arrives as
+      // `version.parent` and must stay `parent`.
+      result[key.slice(8)] = value as Where[string]
     } else {
-      result[key.startsWith('version.') ? key.slice(8) : key] = value as Where[string]
+      result[key === 'parent' ? 'id' : key] = value as Where[string]
     }
   }
   return result
@@ -80,7 +90,7 @@ export const queryDrafts: QueryDrafts = async function queryDrafts(
   // to the top level above, so those prefixed paths never resolve via
   // getByPath. Strip the leading `version.` from every field key so the
   // in-memory filter matches the projected shape.
-  const normalizedWhere = stripVersionPrefix(where)
+  const normalizedWhere = castCollectionWhere(this, collection, stripVersionPrefix(where) ?? undefined)
   const matched = normalizedWhere
     ? projected.filter((doc) => matchesWhere(doc, normalizedWhere))
     : projected

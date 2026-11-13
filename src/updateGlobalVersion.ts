@@ -4,6 +4,7 @@ import { GetCommand } from '@aws-sdk/lib-dynamodb'
 
 import type { DynamoAdapter } from './types.js'
 
+import { castVersionsWhere } from './utilities/castWhere.js'
 import { findFirst } from './utilities/findFirst.js'
 import { projectVersionRow } from './utilities/resolveSchema.js'
 import { stripInternalKeys } from './utilities/stripInternalKeys.js'
@@ -37,7 +38,10 @@ export const updateGlobalVersion: UpdateGlobalVersion = async function updateGlo
     )
     target = result.Item ? stripInternalKeys(result.Item) : null
   } else if (args.where) {
-    target = await findFirst(this, { partition, where: args.where })
+    target = await findFirst(this, {
+      partition,
+      where: castVersionsWhere(this, { kind: 'global', slug: args.global }, args.where),
+    })
   }
 
   if (!target) {

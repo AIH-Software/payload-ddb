@@ -3,6 +3,7 @@ import type { UpdateMany } from 'payload'
 import type { DynamoAdapter } from './types.js'
 
 import { applySorts } from './utilities/applySorts.js'
+import { castCollectionWhere } from './utilities/castWhere.js'
 import { queryMatching } from './utilities/queryMatching.js'
 import { projectForCollection } from './utilities/resolveSchema.js'
 import { putItem } from './utilities/writeItems.js'
@@ -19,8 +20,9 @@ import { putItem } from './utilities/writeItems.js'
  */
 export const updateMany: UpdateMany = async function updateMany(
   this: DynamoAdapter,
-  { collection, data, limit, returning, sort, where },
+  { collection, data, limit, returning, sort, where: rawWhere },
 ) {
+  const where = castCollectionWhere(this, collection, rawWhere)
   const partition = this.resolvePartition(collection)
   const matched = await queryMatching(this, partition, where)
   applySorts(matched, sort)

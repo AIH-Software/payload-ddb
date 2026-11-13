@@ -2,6 +2,7 @@ import type { FindOne } from 'payload'
 
 import type { DynamoAdapter } from './types.js'
 
+import { castCollectionWhere } from './utilities/castWhere.js'
 import { collectionHasDrafts, fetchDraftsOnlySupplements } from './utilities/draftsFallback.js'
 import { findFirst } from './utilities/findFirst.js'
 
@@ -13,8 +14,9 @@ import { findFirst } from './utilities/findFirst.js'
  */
 export const findOne: FindOne = async function findOne(
   this: DynamoAdapter,
-  { collection, where },
+  { collection, where: rawWhere },
 ) {
+  const where = castCollectionWhere(this, collection, rawWhere)
   const partition = this.resolvePartition(collection)
   const found = await findFirst(this, { partition, where })
   if (found) return found as never

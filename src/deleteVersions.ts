@@ -2,6 +2,7 @@ import type { DeleteVersions } from 'payload'
 
 import type { DynamoAdapter } from './types.js'
 
+import { castVersionsWhere } from './utilities/castWhere.js'
 import { queryMatching } from './utilities/queryMatching.js'
 import { deleteItems } from './utilities/writeItems.js'
 
@@ -21,7 +22,11 @@ export const deleteVersions: DeleteVersions = async function deleteVersions(
   }
 
   const partition = this.resolveVersionsPartition(slug)
-  const matched = await queryMatching(this, partition, where)
+  const matched = await queryMatching(
+    this,
+    partition,
+    castVersionsWhere(this, { kind: collection ? 'collection' : 'global', slug }, where),
+  )
 
   await deleteItems(
     this,

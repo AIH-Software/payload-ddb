@@ -94,6 +94,42 @@ describe('drafts collection — find / queryDrafts / supplements', () => {
     expect(list.docs[0]?.title).toBe('draft only')
   })
 
+  it('a drafts query (draft: true) can filter by id', async () => {
+    // Core rewrites a doc-level `id` filter to the version row's `parent`
+    // before calling queryDrafts; the adapter has to map it back, because the
+    // docs it projects from version rows carry that value as `id`.
+    const wanted = await handle.payload.create({
+      collection: 'drafts-on',
+      data: { title: 'wanted', _status: 'published', priority: 1 },
+    })
+    const other = await handle.payload.create({
+      collection: 'drafts-on',
+      data: { title: 'other', _status: 'published', priority: 2 },
+    })
+
+    const byEquals = await handle.payload.find({
+      collection: 'drafts-on',
+      draft: true,
+      where: { id: { equals: wanted.id } },
+    })
+    expect(byEquals.docs.map((doc) => doc.title)).toEqual(['wanted'])
+
+    const byIn = await handle.payload.find({
+      collection: 'drafts-on',
+      draft: true,
+      where: { id: { in: [wanted.id, other.id] } },
+    })
+    expect(byIn.docs.map((doc) => doc.title).sort()).toEqual(['other', 'wanted'])
+
+    const byNotIn = await handle.payload.find({
+      collection: 'drafts-on',
+      draft: true,
+      where: { id: { not_in: [wanted.id] } },
+    })
+    expect(byNotIn.docs.map((doc) => doc.title)).not.toContain('wanted')
+    expect(byNotIn.docs.map((doc) => doc.title)).toContain('other')
+  })
+
   it('latest version contains the most recent draft content', async () => {
     // Tests the same invariant as queryDrafts — that the latest=true row
     // tracks the most recent write — but goes through findVersions to avoid

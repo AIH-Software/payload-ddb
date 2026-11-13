@@ -3,6 +3,7 @@ import type { Find, PaginatedDocs } from 'payload'
 import type { DynamoAdapter } from './types.js'
 
 import { applySorts } from './utilities/applySorts.js'
+import { castCollectionWhere } from './utilities/castWhere.js'
 import { collectionHasDrafts, fetchDraftsOnlySupplements } from './utilities/draftsFallback.js'
 import { queryMatching } from './utilities/queryMatching.js'
 
@@ -25,8 +26,9 @@ import { queryMatching } from './utilities/queryMatching.js'
  */
 export const find: Find = async function find(
   this: DynamoAdapter,
-  { collection, limit = 10, page = 1, pagination = true, sort, where },
+  { collection, limit = 10, page = 1, pagination = true, sort, where: rawWhere },
 ) {
+  const where = castCollectionWhere(this, collection, rawWhere)
   const matched = await queryMatching(this, this.resolvePartition(collection), where)
 
   if (collectionHasDrafts(this, collection)) {

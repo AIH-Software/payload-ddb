@@ -185,8 +185,16 @@ function operatorToExpression(
       return `${path} < ${valueRef(ctx, expected)}`
     case 'less_than_equal':
       return `${path} <= ${valueRef(ctx, expected)}`
-    case 'exists':
-      return expected ? `attribute_exists(${path})` : `attribute_not_exists(${path})`
+    case 'exists': {
+      // "Exists" means "holds a non-null value", same as `matchesWhere`.
+      // Payload writes `null` when a field is cleared and DynamoDB stores
+      // that as a real attribute of type NULL, so `attribute_exists` alone
+      // would report a cleared field as present.
+      const nullType = valueRef(ctx, 'NULL')
+      return expected
+        ? `(attribute_exists(${path}) AND NOT attribute_type(${path}, ${nullType}))`
+        : `(attribute_not_exists(${path}) OR attribute_type(${path}, ${nullType}))`
+    }
     case 'like':
       // JS-only: `whereHasJsOnlyOperator` should have steered the helpers
       // away from compiling this `where` server-side. Returning '' is a

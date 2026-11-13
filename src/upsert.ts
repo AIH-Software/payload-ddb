@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto'
 
 import type { DynamoAdapter } from './types.js'
 
+import { castCollectionWhere } from './utilities/castWhere.js'
 import { findFirst } from './utilities/findFirst.js'
 import { projectForCollection } from './utilities/resolveSchema.js'
 import { putItem } from './utilities/writeItems.js'
@@ -17,8 +18,9 @@ import { putItem } from './utilities/writeItems.js'
  */
 export const upsert: Upsert = async function upsert(
   this: DynamoAdapter,
-  { collection, data, returning, where },
+  { collection, data, returning, where: rawWhere },
 ) {
+  const where = castCollectionWhere(this, collection, rawWhere)
   const partition = this.resolvePartition(collection)
   const found = await findFirst(this, { partition, where })
 

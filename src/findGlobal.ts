@@ -4,6 +4,7 @@ import { GetCommand } from '@aws-sdk/lib-dynamodb'
 
 import type { DynamoAdapter } from './types.js'
 
+import { castGlobalWhere } from './utilities/castWhere.js'
 import { matchesWhere } from './utilities/matchesWhere.js'
 import { stripInternalKeys } from './utilities/stripInternalKeys.js'
 
@@ -36,7 +37,7 @@ export const findGlobal: FindGlobal = async function findGlobal(
     return null as never
   }
   const item = stripInternalKeys(result.Item)
-  if (where && !matchesWhere(item, where)) {
+  if (where && !matchesWhere(item, castGlobalWhere(this, slug, where))) {
     return null as never
   }
   return item as never

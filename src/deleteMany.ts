@@ -2,6 +2,7 @@ import type { DeleteMany } from 'payload'
 
 import type { DynamoAdapter } from './types.js'
 
+import { castCollectionWhere } from './utilities/castWhere.js'
 import { queryMatching } from './utilities/queryMatching.js'
 import { deleteItems } from './utilities/writeItems.js'
 
@@ -11,8 +12,9 @@ import { deleteItems } from './utilities/writeItems.js'
  */
 export const deleteMany: DeleteMany = async function deleteMany(
   this: DynamoAdapter,
-  { collection, where },
+  { collection, where: rawWhere },
 ) {
+  const where = castCollectionWhere(this, collection, rawWhere)
   const partition = this.resolvePartition(collection)
   const matched = await queryMatching(this, partition, where)
 

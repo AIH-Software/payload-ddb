@@ -104,7 +104,19 @@ Supported `where` operators: `equals`, `not_equals`, `greater_than`,
 `like`, plus `and` / `or` composition. Anything else throws by design so
 coverage gaps surface loudly. `like` is case-insensitive and evaluated in JS
 (DynamoDB's `contains()` is case-sensitive, so the adapter doesn't push it
-down).
+down). `exists` treats a field stored as `null` the same as a missing one, and
+for text-like fields an empty string as well.
+
+Operands are cast to the field's stored type before a query runs, so filters
+sent as strings (REST query strings, admin list filters) behave: numeric
+strings on `number` fields, `'true'`/`'false'` on `checkbox` fields, date
+strings on `date` fields, ids on relationships to numeric-id collections, and
+comma-delimited lists for `in` / `not_in`. DynamoDB compares strictly by type,
+so an operand the adapter can't cast (an unknown path, or one that continues
+through a relationship or array) is compared as given.
+
+`create` is insert-only: an id that is already taken is rejected with a
+`ValidationError` on `id` rather than replacing the existing document.
 
 ## Known limits / future work
 

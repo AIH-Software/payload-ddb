@@ -1,15 +1,19 @@
 import type { Where } from 'payload'
 
 import { getByPath } from './getByPath.js'
+import { normalizeForDynamo } from './normalizeForDynamo.js'
 import { SUPPORTED_OPERATORS, unsupportedOperatorError } from './operators.js'
 
 /**
  * In-memory predicate that evaluates a Payload `Where` against a fetched item.
- * Used as a fallback when the query cannot be reduced to a `GetItem` and we
- * have to `Scan` the table.
+ * Used wherever the predicate can't be pushed to DynamoDB: a `where` that
+ * contains a JS-only operator (`like`), and rows that only take their doc
+ * shape after projection (drafts supplements, `queryDrafts`).
  *
- * Supports: `equals`, `not_equals`, `exists`, `in`, `not_in`, `and`, `or`.
- * Throws on any other operator so we surface coverage gaps instead of
+ * Must return the same rows `buildFilterExpression` would for the same
+ * `where` — callers can't tell which evaluator a query takes. The operator
+ * set is shared via `operators.ts`; `test/parity` pins the semantics.
+ * Throws on any unsupported operator so we surface coverage gaps instead of
  * silently returning wrong results.
  */
 export function matchesWhere(item: Record<string, unknown>, where: Where | undefined): boolean {
@@ -60,12 +64,18 @@ export function matchesWhere(item: Record<string, unknown>, where: Where | undef
   return true
 }
 
-function evaluate(actual: unknown, operator: string, expected: unknown): boolean {
+function evaluate(actual: unknown, operator: string, rawExpected: unknown): boolean {
+  // Coerce the operand exactly as `buildFilterExpression` coerces its
+  // expression values (today: `Date` → ISO string, including inside `in` /
+  // `not_in` lists). Rows hold ISO strings, so comparing them against a raw
+  // `Date` would never be equal and would order by `Date#toString()` text.
+  const expected = normalizeForDynamo(rawExpected)
+
   switch (operator) {
     case 'equals':
-      return actual === expected
+      return valuesEqual(actual, expected)
     case 'not_equals':
-      return actual !== expected
+      return !valuesEqual(actual, expected)
     case 'greater_than':
       return compareLoose(actual, expected) > 0
     case 'greater_than_equal':
@@ -77,9 +87,9 @@ function evaluate(actual: unknown, operator: string, expected: unknown): boolean
     case 'exists':
       return expected ? actual !== undefined && actual !== null : actual === undefined || actual === null
     case 'in':
-      return Array.isArray(expected) && expected.includes(actual)
+      return Array.isArray(expected) && expected.some((member) => valuesEqual(actual, member))
     case 'not_in':
-      return Array.isArray(expected) && !expected.includes(actual)
+      return Array.isArray(expected) && !expected.some((member) => valuesEqual(actual, member))
     case 'like': {
       // Empty needle means "no constraint" — mirrors SQL `LIKE '%%'` and what
       // Payload's admin search produces when the search input is cleared.
@@ -93,17 +103,48 @@ function evaluate(actual: unknown, operator: string, expected: unknown): boolean
 }
 
 /**
- * Loose ordered comparison matching DynamoDB's `<`/`>` semantics: numbers and
- * strings (including ISO date strings) compare naturally; nullish on either
- * side yields a non-match by returning `NaN`. Lets `greater_than`/`less_than`
- * mirror the server-side filter evaluator behavior.
+ * Equality as DynamoDB's `=` defines it: scalars by value and type, lists
+ * element-by-element in order, maps key-by-key regardless of key order. A
+ * plain `===` would compare objects by reference and never match — which
+ * breaks object operands such as a polymorphic relationship's
+ * `{ relationTo, value }`.
+ *
+ * Keys holding `undefined` are ignored on both sides, since the marshaller
+ * drops them before anything reaches DynamoDB (`removeUndefinedValues`).
+ */
+function valuesEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true
+  if (a === null || b === null || typeof a !== 'object' || typeof b !== 'object') return false
+
+  if (Array.isArray(a) || Array.isArray(b)) {
+    if (!Array.isArray(a) || !Array.isArray(b) || a.length !== b.length) return false
+    return a.every((member, index) => valuesEqual(member, b[index]))
+  }
+
+  const left = a as Record<string, unknown>
+  const right = b as Record<string, unknown>
+  const definedKeys = (record: Record<string, unknown>) =>
+    Object.keys(record).filter((key) => record[key] !== undefined)
+  const leftKeys = definedKeys(left)
+  if (leftKeys.length !== definedKeys(right).length) return false
+  return leftKeys.every((key) => right[key] !== undefined && valuesEqual(left[key], right[key]))
+}
+
+/**
+ * Ordered comparison matching DynamoDB's `<`/`>` semantics: two numbers or
+ * two strings (including ISO date strings) compare naturally; anything else
+ * — a missing side, or operands of different types — yields a non-match by
+ * returning `NaN`. DynamoDB never orders a number against a string, so
+ * falling back to string comparison here would match rows the pushdown
+ * rejects. `castWhere` is what turns a string operand into the field's real
+ * type before it gets this far.
  */
 function compareLoose(a: unknown, b: unknown): number {
-  if (a === undefined || a === null || b === undefined || b === null) return NaN
   if (typeof a === 'number' && typeof b === 'number') return a - b
-  const as = String(a)
-  const bs = String(b)
-  if (as < bs) return -1
-  if (as > bs) return 1
-  return 0
+  if (typeof a === 'string' && typeof b === 'string') {
+    if (a < b) return -1
+    if (a > b) return 1
+    return 0
+  }
+  return NaN
 }

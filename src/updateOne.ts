@@ -4,6 +4,7 @@ import { GetCommand } from '@aws-sdk/lib-dynamodb'
 
 import type { DynamoAdapter } from './types.js'
 
+import { castCollectionWhere } from './utilities/castWhere.js'
 import { findFirst } from './utilities/findFirst.js'
 import { projectForCollection } from './utilities/resolveSchema.js'
 import { stripInternalKeys } from './utilities/stripInternalKeys.js'
@@ -39,7 +40,10 @@ export const updateOne: UpdateOne = async function updateOne(this: DynamoAdapter
     )
     target = result.Item ? stripInternalKeys(result.Item) : null
   } else if (args.where) {
-    target = await findFirst(this, { partition, where: args.where })
+    target = await findFirst(this, {
+      partition,
+      where: castCollectionWhere(this, args.collection, args.where),
+    })
   }
 
   if (!target) {

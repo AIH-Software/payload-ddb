@@ -2,14 +2,16 @@ import type { DeleteOne } from 'payload'
 
 import type { DynamoAdapter } from './types.js'
 
+import { castCollectionWhere } from './utilities/castWhere.js'
 import { findFirst } from './utilities/findFirst.js'
 import { whereToId } from './utilities/whereToId.js'
 import { deleteItem } from './utilities/writeItems.js'
 
 export const deleteOne: DeleteOne = async function deleteOne(
   this: DynamoAdapter,
-  { collection, returning, where },
+  { collection, returning, where: rawWhere },
 ) {
+  const where = castCollectionWhere(this, collection, rawWhere)
   const partition = this.resolvePartition(collection)
   const idFromWhere = whereToId(where)
 

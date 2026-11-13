@@ -58,11 +58,17 @@ function toItem(partition: string, doc: Record<string, unknown>): Record<string,
  * Write `doc` as the full row at (`partition`, `doc.id`), replacing whatever
  * is there. The adapter's update paths are read-merge-write, so this is the
  * write half of both inserts and updates.
+ *
+ * With `mustNotExist`, the write only lands if no row occupies that key yet;
+ * otherwise DynamoDB rejects it and the SDK throws (see
+ * `isConditionalCheckFailed`). Inserts use this so a colliding id can't
+ * silently replace someone else's document.
  */
 export async function putItem(
   adapter: DynamoAdapter,
   partition: string,
   doc: Record<string, unknown>,
+  options: { mustNotExist?: boolean } = {},
 ): Promise<void> {
   const docClient = requireDocClient(adapter)
 
@@ -70,8 +76,18 @@ export async function putItem(
     new PutCommand({
       TableName: adapter.tableName,
       Item: toItem(partition, doc),
+      // Every row carries `pk`, so "no `pk` attribute" means "no row here".
+      ...(options.mustNotExist ? { ConditionExpression: 'attribute_not_exists(pk)' } : {}),
     }),
   )
+}
+
+/**
+ * True when `err` is DynamoDB refusing a write because its condition didn't
+ * hold — e.g. a `putItem` with `mustNotExist` hitting an occupied key.
+ */
+export function isConditionalCheckFailed(err: unknown): boolean {
+  return err instanceof Error && err.name === 'ConditionalCheckFailedException'
 }
 
 /**

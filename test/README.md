@@ -32,6 +32,8 @@ test/
   connect/                     # init lifecycle, ensureTable idempotency
   crud/                        # create / find / update / delete + pagination invariants
   query/                       # operator coverage + findDistinct
+  parity/                      # pushdown vs JS `where` evaluators return the same rows
+  casting/                     # string operands (incl. real REST query strings) cast to field types
   versions/                    # versions, drafts, queryDrafts, drafts-only fallback
   globals/                     # globals + global versions latest invariant
   relationships/               # single, hasMany, polymorphic

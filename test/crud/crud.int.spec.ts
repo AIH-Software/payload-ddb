@@ -1,4 +1,5 @@
 import { GetCommand } from '@aws-sdk/lib-dynamodb'
+import { ValidationError } from 'payload'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import type { DynamoAdapter } from '../../src/index.js'
@@ -70,6 +71,32 @@ describe('CRUD — create / findByID / find / update / delete / count', () => {
     )
     expect(result.Item?.createdAt).toBe(backdated)
     expect(result.Item?.updatedAt).toBe(backdated)
+  })
+
+  it('create rejects an id that is already taken and leaves the existing row alone', async () => {
+    // `PutItem` replaces by default, so without an insert-only condition a
+    // colliding id would silently destroy the original doc. Call the adapter
+    // directly — the `posts` config has no custom `id` field for the local
+    // API to accept one through.
+    const original = await handle.payload.create({
+      collection: 'posts',
+      data: { title: 'original', priority: 1 },
+    })
+
+    const adapter = handle.payload.db as DynamoAdapter
+    const attempt = adapter.create({
+      collection: 'posts',
+      data: { id: original.id, title: 'impostor' },
+    })
+
+    await expect(attempt).rejects.toBeInstanceOf(ValidationError)
+    await expect(attempt).rejects.toMatchObject({
+      data: { collection: 'posts', errors: [{ path: 'id' }] },
+    })
+
+    const after = await handle.payload.findByID({ collection: 'posts', id: original.id })
+    expect(after.title).toBe('original')
+    expect(after.priority).toBe(1)
   })
 
   it('findByID returns the persisted shape', async () => {

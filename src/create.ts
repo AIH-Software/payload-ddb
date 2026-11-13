@@ -1,15 +1,16 @@
 import type { Create } from 'payload'
 
 import { randomUUID } from 'node:crypto'
+import { ValidationError } from 'payload'
 
 import type { DynamoAdapter } from './types.js'
 
 import { projectForCollection } from './utilities/resolveSchema.js'
-import { putItem } from './utilities/writeItems.js'
+import { isConditionalCheckFailed, putItem } from './utilities/writeItems.js'
 
 export const create: Create = async function create(
   this: DynamoAdapter,
-  { collection, customID, data, returning },
+  { collection, customID, data, req, returning },
 ) {
   const id = customID ?? data['id'] ?? randomUUID()
   const now = new Date().toISOString()
@@ -29,7 +30,30 @@ export const create: Create = async function create(
   // registration form's `confirm-password`) would persist verbatim.
   const projected = projectForCollection(this, collection, item)
 
-  await putItem(this, this.resolvePartition(collection), projected)
+  try {
+    // Insert-only: a plain `PutItem` would replace whatever row already sits
+    // at this id, so a caller-supplied id that collides with an existing doc
+    // would silently destroy it.
+    await putItem(this, this.resolvePartition(collection), projected, { mustNotExist: true })
+  } catch (err) {
+    if (!isConditionalCheckFailed(err)) throw err
+    // Surface the collision the way the Mongo and Postgres adapters surface a
+    // duplicate primary key: a `ValidationError` on `id`, which Payload turns
+    // into a 400 with a field-level message.
+    throw new ValidationError(
+      {
+        collection,
+        errors: [
+          {
+            message: req?.t ? req.t('error:valueMustBeUnique') : 'Value must be unique',
+            path: 'id',
+          },
+        ],
+        ...(req ? { req } : {}),
+      },
+      req?.t,
+    )
+  }
 
   return returning === false ? (null as never) : projected
 }
