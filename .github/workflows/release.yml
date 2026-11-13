@@ -24,7 +24,7 @@ jobs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           # Full history so `changeset status` can compare against `main`'s
           # base branch and produce a stable release set.
@@ -35,7 +35,10 @@ jobs:
         run: corepack enable
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        # v6 rather than v7 on purpose: v7 no longer exports a placeholder
+        # NODE_AUTH_TOKEN, so pnpm warns on every command that the token
+        # referenced by the generated .npmrc is unset.
+        uses: actions/setup-node@v6
         with:
           node-version: 24.x
           registry-url: 'https://npm.pkg.github.com'
@@ -130,7 +133,7 @@ jobs:
       id-token: write
     steps:
       - name: Checkout at release tag
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           ref: v${{ needs.release.outputs.version }}
 
@@ -138,7 +141,7 @@ jobs:
         run: corepack enable
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 24.x
           registry-url: 'https://registry.npmjs.org'
