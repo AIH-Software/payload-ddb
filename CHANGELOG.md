@@ -1,5 +1,77 @@
 # @aih-software/payload-ddb
 
+## 4.0.0
+
+### Major Changes
+
+- 6f85dbf: **Breaking:** `where` operands are now cast to the field's stored type, so
+  filters sent as strings no longer silently match nothing.
+
+  The REST API (and the admin list filters built on it) delivers operands as
+  strings: `?where[price][greater_than]=10` arrives as `"10"`. DynamoDB compares
+  strictly by type, so that filter never matched a numeric `price` — no error,
+  just an empty result. Every method that takes a `where` now runs it through
+  `castWhere` first, following the rules of Payload's Mongo and Postgres
+  adapters:
+
+  - `number`: numeric strings → number.
+  - `checkbox`: `'true'` / `'false'` → boolean.
+  - `date`: date strings (including date-only ones like `2026-01-01`), epoch
+    milliseconds and `Date`s → the full ISO string that is stored.
+  - `relationship` / `upload`: `'null'` → `null`, and ids → number when the
+    related collection has numeric ids (also inside a polymorphic
+    `{ relationTo, value }`). Likewise `id` on a numeric-id collection.
+  - `in` / `not_in`: a comma-delimited string → a list, each member cast.
+  - `exists`: `'true'` / `'false'` → boolean (previously the string `'false'`
+    was treated as true). For text-like fields an empty string now counts as
+    absent, matching the Mongo adapter — that is what a cleared text input
+    leaves behind.
+
+  Operands the adapter can't confidently cast are left as given: unknown paths,
+  and paths that continue through a relationship or array.
+
+  Two related fixes:
+
+  - The JS evaluator no longer falls back to comparing operands of different
+    types as text, which matched rows the DynamoDB pushdown rejected.
+  - A drafts query (`draft: true`) filtered by `id` returned nothing: core
+    rewrites `id` to the version row's `parent`, and the adapter didn't map it
+    back onto the docs it projects.
+
+  This is breaking in the sense that queries which used to return nothing (or,
+  on the JS path, rows matched by accident) now return the rows they describe:
+  REST and admin filters on number, checkbox, date and relationship fields,
+  `exists` on text fields holding an empty string, and draft queries filtered
+  by `id`. Review any code that depended on those filters being inert.
+
+- 6f85dbf: **Breaking:** `create` no longer overwrites an existing document, and the two
+  `where` evaluators now return the same rows.
+
+  `create` wrote with a plain `PutItem`, so a caller-supplied id that collided
+  with an existing doc silently replaced it. The write is now insert-only
+  (`attribute_not_exists(pk)`), and a collision throws a `ValidationError` on
+  `id` — the same shape the Mongo and Postgres adapters produce for a duplicate
+  primary key.
+
+  A `where` is evaluated either by DynamoDB (`FilterExpression` pushdown) or in
+  JS (`matchesWhere`), depending on whether it contains `like` and whether the
+  collection has drafts. The two disagreed in three places:
+
+  - `exists`: the pushdown counted a field stored as `null` as existing. Both
+    now treat `null` the same as a missing attribute.
+  - `Date` operands: the JS path compared the raw `Date` against stored ISO
+    strings, so `equals` / `in` never matched and ordered comparisons were
+    wrong. It now normalizes operands the way the pushdown does.
+  - Object operands (e.g. a polymorphic relationship's `{ relationTo, value }`):
+    the JS path compared by reference and never matched. It now compares by
+    content, as DynamoDB does.
+
+  `test/parity` runs each case through both evaluators to keep them aligned.
+
+  This is breaking for any consumer that relied on `create` replacing a document
+  whose id already existed (it now throws), or on `exists` counting a field
+  stored as `null` as present.
+
 ## 3.1.0
 
 ### Minor Changes
