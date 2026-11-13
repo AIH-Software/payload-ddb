@@ -3,11 +3,15 @@ import type { Where } from 'payload'
 import type { DynamoAdapter } from '../types.js'
 
 import { buildFilterExpression } from './buildFilterExpression.js'
+import { findByIndex } from './indexLookup.js'
 import { queryMatching } from './queryMatching.js'
 import { partitionPages } from './queryPartition.js'
 
 /**
  * Count the rows of a partition matching `where`.
+ *
+ * When a clause pins the rows down by key they are read by key and counted
+ * (`findByIndex`). Otherwise the partition is walked:
  *
  * When the whole `where` can be pushed down, DynamoDB does the counting
  * (`Select: 'COUNT'`) and no item bytes cross the wire. Otherwise the only
@@ -22,6 +26,9 @@ export async function queryCount(
   const compiled = buildFilterExpression(where)
   // Always-false predicate (e.g. `in: []`) → zero rows without a round-trip.
   if (compiled.never) return 0
+
+  const viaIndex = await findByIndex(adapter, partition, where)
+  if (viaIndex) return viaIndex.length
 
   if (!compiled.exact) {
     return (await queryMatching(adapter, partition, where)).length

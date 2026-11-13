@@ -67,6 +67,18 @@ export type Args = {
    */
   migrationDir?: string
   /**
+   * Answer lookups by a `unique: true` or `index: true` field from index
+   * rows instead of reading the whole collection, and maintain those rows on
+   * every write. See the README's "Indexes" section.
+   *
+   * Set to `false` to turn both off: nothing extra is written for
+   * `index: true` fields and only lookups by `id` skip the partition read.
+   * Unique fields are enforced either way.
+   *
+   * @default true
+   */
+  indexes?: boolean
+  /**
    * If true, the adapter will provision the table at init time when it
    * doesn't already exist. Disable in production where infra is managed
    * out-of-band (CDK, Terraform, CloudFormation).
@@ -96,6 +108,8 @@ export interface DynamoAdapter extends BaseDatabaseAdapter {
   /** The single table name that backs all collections, globals, and versions. */
   tableName: string
   ensureTables: boolean
+  /** Whether field indexes are maintained and used for lookups. */
+  indexes: boolean
   /**
    * Resolve a collection or global slug to its DynamoDB partition key value.
    * Today this is the slug verbatim — kept as a method so future schemes

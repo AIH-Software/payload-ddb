@@ -2,9 +2,9 @@ import type { DeleteOne } from 'payload'
 
 import type { DynamoAdapter } from './types.js'
 
+import { hasCompanionRows } from './utilities/fieldIndexes.js'
 import { findFirst } from './utilities/findFirst.js'
 import { prepareCollectionWhere } from './utilities/prepareWhere.js'
-import { hasUniqueFields } from './utilities/uniqueGuards.js'
 import { whereToId } from './utilities/whereToId.js'
 import { deleteItem } from './utilities/writeItems.js'
 
@@ -15,9 +15,9 @@ export const deleteOne: DeleteOne = async function deleteOne(
   const where = await prepareCollectionWhere(this, collection, rawWhere)
   const partition = this.resolvePartition(collection)
   const idFromWhere = whereToId(where)
-  // Releasing a document's unique guards needs its values, so those
-  // collections always read the document first.
-  const guarded = hasUniqueFields(this, collection)
+  // Removing a document's unique guards and index rows needs its values, so
+  // collections that have either always read the document first.
+  const guarded = hasCompanionRows(this, collection)
 
   // Fast path — pure id-equality lets us delete and capture the doc in one call.
   if (idFromWhere !== null && !guarded) {
@@ -39,7 +39,7 @@ export const deleteOne: DeleteOne = async function deleteOne(
     this,
     partition,
     found['id'],
-    guarded ? { unique: { collection, doc: found } } : {},
+    guarded ? { companions: { collection, doc: found } } : {},
   )
 
   if (returning === false) {

@@ -33,8 +33,8 @@ import { updateVersion } from './updateVersion.js'
 import { upsert } from './upsert.js'
 
 export type { Args, DynamoAdapter } from './types.js'
-export { backfillUniqueGuards } from './utilities/backfillUniqueGuards.js'
-export type { UniqueBackfillReport } from './utilities/backfillUniqueGuards.js'
+export { backfillIndexes, backfillUniqueGuards } from './utilities/backfillIndexes.js'
+export type { IndexBackfillReport, UniqueBackfillReport } from './utilities/backfillIndexes.js'
 export { scrubUnknownFields } from './utilities/scrubUnknownFields.js'
 export type { ScrubReport } from './utilities/scrubUnknownFields.js'
 
@@ -68,6 +68,7 @@ export function dynamoAdapter(args: Args = {}): DatabaseAdapterObj<DynamoAdapter
       ownsClient: !args.client,
       tableName,
       ensureTables: args.ensureTables ?? false,
+      indexes: args.indexes ?? true,
       // `createDatabaseAdapter` falls back to 'migrations' when this is unset.
       ...(args.migrationDir ? { migrationDir: args.migrationDir } : {}),
       resolvePartition,

@@ -61,7 +61,7 @@ export const upsert: Upsert = async function upsert(
     try {
       await putItem(this, partition, projected, {
         ...(found ? { replaces: found } : { mustNotExist: true }),
-        unique: { collection },
+        collection,
       })
       return returning === false ? (null as never) : (projected as never)
     } catch (err) {

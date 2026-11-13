@@ -5,6 +5,7 @@ import { GetCommand } from '@aws-sdk/lib-dynamodb'
 import type { DynamoAdapter } from '../types.js'
 
 import { buildFilterExpression } from './buildFilterExpression.js'
+import { findByIndex } from './indexLookup.js'
 import { matchesWhere } from './matchesWhere.js'
 import { partitionPages } from './queryPartition.js'
 import { stripInternalKeys } from './stripInternalKeys.js'
@@ -16,6 +17,8 @@ import { whereToId } from './whereToId.js'
  *
  * Fast path: if `where` is a pure id-equality, do a single `GetItem` with the
  * full composite key.
+ * Indexed path: if a clause pins the rows down by key (a unique value, an
+ * indexed value, an id among other clauses), read them by key (`findByIndex`).
  * Slow path: walk the partition with as much of `where` pushed down as
  * DynamoDB can express, re-check rows with `matchesWhere` when that pushdown
  * is inexact, and stop on the first match in any page.
@@ -47,6 +50,9 @@ export async function findFirst(
   const compiled = buildFilterExpression(where)
   // Always-false predicate (e.g. `in: []`) → no document can match.
   if (compiled.never) return null
+
+  const viaIndex = await findByIndex(adapter, partition, where)
+  if (viaIndex) return viaIndex[0] ?? null
 
   for await (const page of partitionPages(adapter, partition, compiled.filter)) {
     for (const item of page.items) {

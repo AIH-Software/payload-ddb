@@ -18,8 +18,8 @@ export type PartitionPage = {
  *
  * Cost note: `FilterExpression` reduces network bytes but not RCU
  * consumption. DynamoDB still reads every row in the partition before
- * filtering. The next meaningful optimization is GSIs that mirror specific
- * access patterns (e.g. `email` for auth, `slug` for public collections).
+ * filtering. Lookups that can avoid that — by id, unique value or indexed
+ * value — never get here; see `indexLookup`.
  *
  * With `countOnly`, `Select: 'COUNT'` keeps DynamoDB from shipping item
  * bytes — only the post-filter `Count` per page comes back over the wire.

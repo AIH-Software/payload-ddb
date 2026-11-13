@@ -6,9 +6,11 @@ stores data in [Amazon DynamoDB](https://aws.amazon.com/dynamodb/).
 > **Status:** all `BaseDatabaseAdapter` methods are implemented end-to-end:
 > CRUD, drafts, versions, globals, localization, every `where` operator, join
 > fields and unique fields. The current strategy is "correct first, optimize
-> later" — a single shared table with a `Query`-per-collection access pattern
-> and no GSIs. Suitable for development and small-to-medium workloads; large
-> collections will want the optimizations listed under *Known limits*.
+> later" — a single shared table where lookups by id, unique field or indexed
+> field go straight to the matching rows, and every other filter reads the
+> collection's partition. Suitable for development and small-to-medium
+> workloads; large collections will want the optimizations listed under
+> *Known limits*.
 
 ## Requirements
 
@@ -89,6 +91,7 @@ value in the same physical table.
 | `tableName` | `string` | `'payload'` | The single DynamoDB table backing every collection, global, and versions stream. |
 | `ensureTables` | `boolean` | `false` | When true, auto-creates the table at init if it doesn't exist. Dev-loop convenience; turn off in production. |
 | `migrationDir` | `string` | `'migrations'` | Directory Payload reads and writes migration files in. |
+| `indexes` | `boolean` | `true` | Maintain index rows for `index: true` fields and answer lookups by an indexed or unique field from them instead of reading the collection. See *Indexes*. |
 
 ## Data layout
 
@@ -107,9 +110,15 @@ value in the same physical table.
   silently overwrite each other.
 - **Unique guards:** `pk = "<slug>#unique#<field path>"`, `sk = "<value>"`,
   one small row per value of a `unique: true` field. See *Unique fields*.
-- **No GSIs or LSIs.** Per-collection reads are `Query`s scoped by `pk`;
-  predicates beyond `pk` get pushed to `FilterExpression` (DynamoDB still
-  reads every row in the partition before filtering).
+- **Index rows:** `pk = "<slug>#index#<field path>"`, `sk = "<value>#<id>"`,
+  one small row per value of an `index: true` field. See *Indexes*.
+- **Index markers:** `pk = "payload-ddb#indexes"`, one row per index that is
+  known to cover every document.
+- **No GSIs or LSIs.** Indexes are ordinary rows in the same table, which is
+  what lets them be read with strong consistency. A filter no index can
+  answer is a `Query` scoped by `pk`, with its predicates pushed to
+  `FilterExpression` (DynamoDB still reads every row in the partition before
+  filtering).
 
 ## What's implemented
 
@@ -153,13 +162,69 @@ Every Payload `where` operator is supported: `equals`, `not_equals`,
 - **Geo operators** work on `point` fields. Distances are great-circle
   metres; polygon tests are planar.
 
+### Indexes
+
+A filter normally reads the collection's whole partition. Three kinds of
+clause avoid that and read only the matching documents:
+
+| Clause | Answered from |
+|---|---|
+| `id` `equals` / `in` | the documents' own keys |
+| `equals` / `in` on a `unique: true` field | the field's unique guards |
+| `equals` / `in` on an `index: true` field | index rows |
+
+The clause has to hold for every result: at the top level or inside `and`,
+not on one side of an `or`. The rest of the `where` is then evaluated on the
+documents it selects. This covers login by `email`, pages by `slug`,
+relationship population (`id in [...]`), filters on a relationship, and join
+fields.
+
+- **Which fields.** `index: true` on a `text`, `email`, `number`,
+  `relationship` or `upload` field — including `hasMany` fields (one row per
+  element), fields in groups and named tabs, and localized fields (per
+  locale). Payload sets the flag itself on the field a join points at. Fields
+  in arrays or blocks, polymorphic relationships, and types where equality
+  rarely narrows a read (`checkbox`, `date`, `select`) are not indexed.
+- **Consistency.** Index rows are written in the same transaction as their
+  document and read with strong consistency, so a lookup sees a document as
+  soon as it is written — which a DynamoDB GSI can't promise.
+- **Write cost.** A write that adds or removes index rows is a transaction:
+  twice the write units for the document, plus the rows. An update that
+  leaves the indexed fields alone costs what it did before.
+- **Large matches.** A lookup that finds more than 256 candidate documents
+  falls back to reading the partition, which is the cheaper read by then.
+- **Opting out.** `indexes: false` stops both the index rows and the routed
+  lookups. Lookups by `id` and unique enforcement are unaffected. Every
+  instance sharing a table must use the same setting.
+
+**Existing data.** An index is only used once it is known to cover every
+document. A collection that is empty when the adapter starts qualifies
+straight away, which covers new tables and new collections. For a collection
+that already has documents — after upgrading, or after adding `index: true`
+to a field — run the backfill once; until then its lookups keep reading the
+partition:
+
+```ts
+import { backfillIndexes } from '@aih-software/payload-ddb'
+
+const report = await backfillIndexes(payload)
+// report.collections[slug].ready lists the indexes now in use
+```
+
+The backfill is safe to run while the application is serving. When upgrading
+from a version before 4.2, finish the rollout first: older instances write
+documents without index rows, so run the backfill once after the last one is
+gone.
+
 ### Join fields
 
-`join` fields are resolved for `find`, `findByID` and draft queries: one query
-per target collection for all returned documents, grouped in memory, with
-`limit`, `page`, `sort`, `where` and `count` applied per parent document.
-Polymorphic joins (`collection: [...]`) return `{ relationTo, value }` entries.
-Joined documents are read from the target's published rows.
+`join` fields are resolved for `find`, `findByID` and draft queries: one
+lookup per target collection for all returned documents, grouped in memory,
+with `limit`, `page`, `sort`, `where` and `count` applied per parent document.
+The lookup uses the index on the field the join points at, so it doesn't read
+the target collection's partition. Polymorphic joins (`collection: [...]`)
+return `{ relationTo, value }` entries. Joined documents are read from the
+target's published rows.
 
 ### Write guarantees
 
@@ -190,34 +255,37 @@ values (`null`, `''`) are not guarded. Unique fields inside arrays or blocks,
 and `hasMany` fields, are not enforced.
 
 Writes to a collection with unique fields are transactional and cost twice the
-write units; collections without them are unaffected.
+write units.
 
 Documents written before this was enforced have no guards until they are next
-saved. To cover them in one pass:
+saved. `backfillIndexes` (see *Indexes*) covers them in the same pass:
 
 ```ts
-import { backfillUniqueGuards } from '@aih-software/payload-ddb'
-
-const report = await backfillUniqueGuards(payload)
+const report = await backfillIndexes(payload)
 // report.collections[slug].conflicts lists pre-existing duplicates
 ```
 
+A unique field with unresolved duplicates stays out of use for lookups until
+they are fixed and the pass is run again. `backfillUniqueGuards` is kept as an
+alias.
+
 ## Known limits / future work
 
-- **No GSI routing.** Every non-id read is a `Query` against the collection's
-  partition (with `FilterExpression` pushdown — DynamoDB still reads every
-  row in the partition internally, but only matching rows come back over the
-  wire). Adding GSIs that mirror Payload's common access patterns
-  (e.g. `email` for auth, `slug` for public-facing collections) is the
-  highest-impact remaining optimization milestone.
+- **Indexes answer equality only.** Range filters (`greater_than`, …),
+  sorting and pagination still read the partition and work in memory, as does
+  any filter without an indexed `equals` / `in` clause. Sorted indexes are
+  the next optimization milestone.
+- **Version rows aren't indexed.** On a drafts-enabled collection, saving a
+  document and listing drafts both read that collection's versions
+  partition.
 - **Payload-level transactions are no-op.** `beginTransaction` returns `null`;
   commit/rollback do nothing. Per-method atomicity (e.g. `createVersion`'s
   flip+put) uses DynamoDB `TransactWriteItems` already; full Payload-context
   transaction buffering across multiple adapter calls is its own milestone.
-- **Filters cost a partition read.** Clauses evaluated in JS, relationship
-  paths and joins all read the partitions involved in full (a relationship
-  path or join adds one read of the related collection). Fine at CMS scale;
-  the GSI milestone is what removes it.
+- **Relationship paths read the related collection.** `author.name equals
+  'Ada'` first finds the matching authors — a partition read unless `name` is
+  indexed — and then looks the documents up through the index on `author`,
+  when it has one.
 - **Joins don't see unpublished drafts** of the joined collection.
 - **`locale: 'all'`** in a filter or sort falls back to the default locale.
 - **`like` matches its operand as one substring.** Payload's Mongo adapter

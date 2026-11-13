@@ -36,9 +36,9 @@ export const create: Create = async function create(
     try {
       // Insert-only: a plain `PutItem` would replace whatever row already
       // sits at this id, so a caller-supplied id that collides with an
-      // existing doc would silently destroy it. `unique` adds a guard row per
-      // unique field in the same transaction.
-      await putItem(this, partition, projected, { mustNotExist: true, unique: { collection } })
+      // existing doc would silently destroy it. `collection` adds the
+      // document's unique guards and index rows to the same transaction.
+      await putItem(this, partition, projected, { collection, mustNotExist: true })
       break
     } catch (err) {
       rethrowUniqueViolation(err, collection, req)

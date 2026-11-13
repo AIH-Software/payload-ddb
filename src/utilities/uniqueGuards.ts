@@ -21,6 +21,9 @@ import type { DynamoAdapter } from '../types.js'
  * is cancelled. Guards live in their own partitions, so they never show up
  * in a collection's reads.
  *
+ * A guard also answers "which document has this value?" in one `GetItem`,
+ * so lookups by a unique field are routed through it — see `indexLookup`.
+ *
  * Covered: scalar unique fields at the top level or inside groups / named
  * tabs, including localized ones (one guard per locale). Not covered:
  * unique fields inside arrays or blocks, and `hasMany` fields — a list has
@@ -36,9 +39,21 @@ export type UniqueGuard = {
   path: string
 }
 
-type UniqueField = { field: FlattenedField; path: string[] }
+/** One field value found in a document, with where it lives. */
+export type Leaf = {
+  field: FlattenedField
+  /** Schema path, without locale — what a validation error names. */
+  schemaPath: string
+  /** Path the value is stored under, locale key included (`title.en`). */
+  storedPath: string
+  value: unknown
+}
 
 const cache = new WeakMap<DynamoAdapter, Map<string, boolean>>()
+
+function fieldsOf(adapter: DynamoAdapter, collectionSlug: string): FlattenedField[] | undefined {
+  return adapter.payload?.collections?.[collectionSlug]?.config.flattenedFields
+}
 
 /** Whether a collection declares any unique field the adapter guards. */
 export function hasUniqueFields(adapter: DynamoAdapter, collectionSlug: string): boolean {
@@ -50,13 +65,14 @@ export function hasUniqueFields(adapter: DynamoAdapter, collectionSlug: string):
   const cached = known.get(collectionSlug)
   if (cached !== undefined) return cached
 
-  const fields = adapter.payload?.collections?.[collectionSlug]?.config.flattenedFields
+  const fields = fieldsOf(adapter, collectionSlug)
   const result = fields ? containsUnique(fields) : false
   known.set(collectionSlug, result)
   return result
 }
 
-function isGuardable(field: FlattenedField): boolean {
+/** A unique field whose values get guard rows. */
+export function isGuardable(field: FlattenedField): boolean {
   return (
     'unique' in field &&
     Boolean(field.unique) &&
@@ -73,22 +89,26 @@ function containsUnique(fields: FlattenedField[]): boolean {
   })
 }
 
-/** Every guard a document's current values call for. */
-export function uniqueGuardsFor(
+/**
+ * Walk a document along its collection's schema and report the value of
+ * every field `accept` picks. Groups and named tabs are descended into;
+ * arrays and blocks are not (a row in a list has no single stored path). A
+ * localized field is reported once per locale it has a value for.
+ */
+export function visitLeaves(
   adapter: DynamoAdapter,
   collectionSlug: string,
-  partition: string,
   doc: Record<string, unknown>,
-): UniqueGuard[] {
-  if (!hasUniqueFields(adapter, collectionSlug)) return []
-  const fields = adapter.payload.collections[collectionSlug]!.config.flattenedFields
+  accept: (field: FlattenedField) => boolean,
+  visit: (leaf: Leaf) => void,
+): void {
+  const fields = fieldsOf(adapter, collectionSlug)
+  if (!fields) return
   const localeCodes = adapter.payload.config.localization
     ? adapter.payload.config.localization.localeCodes
     : null
 
-  const guards: UniqueGuard[] = []
   collect(doc, fields, [], [], false)
-  return guards
 
   function collect(
     source: unknown,
@@ -103,7 +123,7 @@ export function uniqueGuardsFor(
     for (const field of level) {
       if (field.type === 'array' || field.type === 'blocks') continue
       const isContainer = 'flattenedFields' in field
-      if (!isContainer && !isGuardable(field)) continue
+      if (!isContainer && !accept(field)) continue
 
       const value = record[field.name]
       const schema = [...schemaPath, field.name]
@@ -125,23 +145,49 @@ export function uniqueGuardsFor(
           collect(inner, field.flattenedFields, schema, innerStored, parentIsLocalized || localized)
           continue
         }
-        const sk = encodeValue(inner)
-        if (sk === null) continue
-        guards.push({
-          key: { pk: `${partition}#unique#${innerStored.join('.')}`, sk },
-          path: schema.join('.'),
+        visit({
+          field,
+          schemaPath: schema.join('.'),
+          storedPath: innerStored.join('.'),
+          value: inner,
         })
       }
     }
   }
 }
 
+/** The partition holding the guards of one unique field. */
+export function guardPartition(partition: string, storedPath: string): string {
+  return `${partition}#unique#${storedPath}`
+}
+
+/** Every guard a document's current values call for. */
+export function uniqueGuardsFor(
+  adapter: DynamoAdapter,
+  collectionSlug: string,
+  partition: string,
+  doc: Record<string, unknown>,
+): UniqueGuard[] {
+  if (!hasUniqueFields(adapter, collectionSlug)) return []
+
+  const guards: UniqueGuard[] = []
+  visitLeaves(adapter, collectionSlug, doc, isGuardable, (leaf) => {
+    const sk = encodeValue(leaf.value)
+    if (sk === null) return
+    guards.push({
+      key: { pk: guardPartition(partition, leaf.storedPath), sk },
+      path: leaf.schemaPath,
+    })
+  })
+  return guards
+}
+
 /**
- * Turn a value into a sort key. The type tag keeps `1` and `'1'` apart;
- * long strings are hashed because a sort key is capped at 1024 bytes.
+ * Turn a value into a guard's sort key. The type tag keeps `1` and `'1'`
+ * apart; long strings are hashed because a sort key is capped at 1024 bytes.
  * Returns `null` for values that aren't guarded.
  */
-function encodeValue(value: unknown): null | string {
+export function encodeValue(value: unknown): null | string {
   switch (typeof value) {
     case 'boolean':
       return `b:${value}`

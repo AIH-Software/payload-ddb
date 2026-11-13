@@ -4,6 +4,7 @@ import type { DynamoAdapter } from './types.js'
 
 import { ensureConnected } from './utilities/ensureConnected.js'
 import { ensureTable } from './utilities/ensureTable.js'
+import { prepareIndexState } from './utilities/indexState.js'
 
 /**
  * Lifecycle hook called once after the factory `init` returns the adapter.
@@ -29,4 +30,9 @@ export const init: Init = async function (this: DynamoAdapter) {
     await ensureTable(this, this.tableName)
     this.payload.logger.debug('payload-ddb: table ready')
   }
+
+  // Learn which indexes are complete, and mark those of empty collections
+  // (every collection, on a new table) so lookups can use them from the
+  // first document on.
+  await prepareIndexState(this)
 }

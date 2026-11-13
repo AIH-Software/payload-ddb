@@ -60,7 +60,7 @@ export const updateMany: UpdateMany = async function updateMany(
             updatedAt,
           }
           const projected = projectForCollection(this, collection, merged)
-          await putItem(this, partition, projected, { replaces: current, unique: { collection } })
+          await putItem(this, partition, projected, { collection, replaces: current })
           return projected
         },
       ),

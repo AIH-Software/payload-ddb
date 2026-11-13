@@ -54,7 +54,7 @@ export const updateOne: UpdateOne = async function updateOne(this: DynamoAdapter
       // unknown keys in the incoming patch and any pre-existing leaked keys
       // on the persisted target — every update doubles as incremental cleanup.
       const projected = projectForCollection(this, collection, merged)
-      await putItem(this, partition, projected, { replaces: target, unique: { collection } })
+      await putItem(this, partition, projected, { collection, replaces: target })
       return projected
     })
   } catch (err) {

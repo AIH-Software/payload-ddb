@@ -10,6 +10,7 @@ import { APIError } from 'payload'
 
 import type { DynamoAdapter } from '../types.js'
 
+import { type IndexRow, indexRowsFor, sameIndexRow } from './fieldIndexes.js'
 import { mapWithConcurrency } from './mapWithConcurrency.js'
 import { normalizeForDynamo } from './normalizeForDynamo.js'
 import { revisionOf, stripInternalKeys } from './stripInternalKeys.js'
@@ -27,15 +28,18 @@ import { sameGuard, type UniqueGuard, uniqueGuardsFor } from './uniqueGuards.js'
  * (`toItem`), and anything that needs to see every mutation (e.g. buffering
  * writes for a Payload-level transaction) has one seam to hook into.
  *
- * Three guarantees are enforced here, each by a condition DynamoDB checks
- * atomically with the write:
+ * Four guarantees are enforced here, each by DynamoDB applying the write
+ * atomically:
  *
  *  - **Insert-only** (`mustNotExist`): a new document can't replace one that
  *    already has its id.
  *  - **No lost updates** (`replaces`): a read-merge-write only lands if the
  *    row is still at the revision that was read. See `stripInternalKeys`.
- *  - **Unique fields** (`unique`): the document and a guard row per unique
- *    value are written in one transaction. See `uniqueGuards`.
+ *  - **Unique fields** (`collection`): the document and a guard row per
+ *    unique value are written in one transaction. See `uniqueGuards`.
+ *  - **Complete indexes** (`collection`): the index rows of a document's
+ *    `index: true` fields change in the same transaction as the document,
+ *    so a lookup through them never misses it. See `fieldIndexes`.
  *
  * Callers stay responsible for everything Payload-shaped: locating the
  * target, merging the patch, defaulting timestamps, and projecting against
@@ -53,6 +57,9 @@ import { sameGuard, type UniqueGuard, uniqueGuardsFor } from './uniqueGuards.js'
  * every other request the process is making.
  */
 export const WRITE_CONCURRENCY = 25
+
+/** `TransactWriteItems` takes at most 100 actions. */
+const MAX_TRANSACTION_ITEMS = 100
 
 /**
  * The write's own precondition didn't hold: the id was already taken
@@ -194,6 +201,68 @@ export async function claimGuard(
   }
 }
 
+type TransactItem = NonNullable<TransactWriteCommandInput['TransactItems']>[number]
+
+const indexPut = (adapter: DynamoAdapter, row: IndexRow, owner: string): TransactItem => ({
+  Put: { TableName: adapter.tableName, Item: { ...row, owner } },
+})
+
+const indexDelete = (adapter: DynamoAdapter, row: IndexRow): TransactItem => ({
+  Delete: { TableName: adapter.tableName, Key: row },
+})
+
+/**
+ * Turn a document's index-row changes into transaction actions, within the
+ * `room` the transaction has left.
+ *
+ * Almost always everything fits. A document that changes more index rows
+ * than that — a `hasMany` field gaining or losing around a hundred values
+ * in one write — is handled so that the index can only err towards having
+ * *extra* rows, which lookups tolerate, never towards missing one:
+ *
+ *  - additions that don't fit are written first, on their own. If the
+ *    document write then fails they are stray rows pointing at a document
+ *    that doesn't hold the value. (For an update this is exact, because the
+ *    write only lands if nothing else touched the document since it was
+ *    read. For an insert, a concurrent delete-and-recreate of the very same
+ *    id could remove such a row; ids aren't reused in practice.)
+ *  - removals that don't fit are skipped, leaving stray rows behind.
+ */
+async function fitIndexWrites(
+  adapter: DynamoAdapter,
+  owner: string,
+  added: IndexRow[],
+  removed: IndexRow[],
+  room: number,
+): Promise<TransactItem[]> {
+  const removals = removed.slice(0, Math.max(0, room))
+  const additions = added.slice(0, Math.max(0, room - removals.length))
+  const early = added.slice(additions.length)
+
+  if (early.length > 0) {
+    const docClient = requireDocClient(adapter)
+    await mapWithConcurrency(early, WRITE_CONCURRENCY, (row) =>
+      docClient.send(new PutCommand({ TableName: adapter.tableName, Item: { ...row, owner } })),
+    )
+  }
+
+  return [
+    ...removals.map((row) => indexDelete(adapter, row)),
+    ...additions.map((row) => indexPut(adapter, row, owner)),
+  ]
+}
+
+/** Write one index row outside of a document write (used by `backfillIndexes`). */
+export async function putIndexRow(
+  adapter: DynamoAdapter,
+  row: IndexRow,
+  owner: string,
+): Promise<void> {
+  await requireDocClient(adapter).send(
+    new PutCommand({ TableName: adapter.tableName, Item: { ...row, owner } }),
+  )
+}
+
 export type PutOptions = {
   /** Insert-only: fail if a row already occupies this id. */
   mustNotExist?: boolean
@@ -202,8 +271,11 @@ export type PutOptions = {
    * if the stored row is still at that revision.
    */
   replaces?: Record<string, unknown>
-  /** Enforce the unique fields of this collection for `doc`. */
-  unique?: { collection: string }
+  /**
+   * The collection `doc` belongs to. Its unique guards and index rows are
+   * written with the document.
+   */
+  collection?: string
 }
 
 /**
@@ -221,7 +293,7 @@ export async function putItem(
   options: PutOptions = {},
 ): Promise<void> {
   const docClient = requireDocClient(adapter)
-  const { mustNotExist, replaces, unique } = options
+  const { collection, mustNotExist, replaces } = options
 
   const previousRevision = replaces ? revisionOf(replaces) : undefined
   const item = toItem(partition, doc, (previousRevision ?? 0) + 1)
@@ -245,19 +317,28 @@ export async function putItem(
     }
   }
 
-  const guards = unique ? uniqueGuardsFor(adapter, unique.collection, partition, doc) : []
+  const guards = collection ? uniqueGuardsFor(adapter, collection, partition, doc) : []
   // Guards for values this document no longer has. Those are released, but
   // only if they're ours: a row written before guards existed may share a
   // value with the document that later claimed it.
   let released =
-    unique && replaces
-      ? uniqueGuardsFor(adapter, unique.collection, partition, replaces).filter(
+    collection && replaces
+      ? uniqueGuardsFor(adapter, collection, partition, replaces).filter(
           (old) => !guards.some((current) => sameGuard(current, old)),
         )
       : []
 
+  // Index rows follow the document's values: only the difference from the
+  // row being replaced is written, so an update that leaves the indexed
+  // fields alone costs nothing extra.
+  const rows = collection ? indexRowsFor(adapter, collection, partition, doc) : []
+  const previousRows =
+    collection && replaces ? indexRowsFor(adapter, collection, partition, replaces) : []
+  const added = rows.filter((row) => !previousRows.some((old) => sameIndexRow(old, row)))
+  const removed = previousRows.filter((old) => !rows.some((row) => sameIndexRow(old, row)))
+
   try {
-    if (guards.length === 0 && released.length === 0) {
+    if (guards.length + released.length + added.length + removed.length === 0) {
       await docClient.send(
         new PutCommand({ TableName: adapter.tableName, Item: item, ...condition }),
       )
@@ -266,6 +347,13 @@ export async function putItem(
 
     const owner = String(doc['id'])
     const mine = ownedBy(owner)
+    const indexWrites = await fitIndexWrites(
+      adapter,
+      owner,
+      added,
+      removed,
+      MAX_TRANSACTION_ITEMS - 1 - guards.length - released.length,
+    )
 
     // At most two passes: if a released guard turns out to belong to someone
     // else, leave it alone and write the rest.
@@ -280,6 +368,9 @@ export async function putItem(
         ...released.map((guard) => ({
           Delete: { TableName: adapter.tableName, Key: guard.key, ...mine },
         })),
+        // Unconditional, and last, so the positions above stay what the
+        // cancellation handling below expects.
+        ...indexWrites,
       ]
 
       try {
@@ -302,12 +393,25 @@ export async function putItem(
           throw new UniqueViolationError(guards[taken]!.path)
         }
         const kept = released.filter((_, index) => !failed(1 + guards.length + index))
-        if (kept.length === released.length) throw err
-        released = kept
+        if (kept.length < released.length) {
+          released = kept
+          continue
+        }
+        // What's left are the index rows, which carry no condition: the only
+        // way they cancel is another write to this same document in flight.
+        if (reasons.some((reason) => reason?.Code === 'TransactionConflict')) {
+          throw new ConditionFailedError()
+        }
+        throw err
       }
     }
   } catch (err) {
-    if (err instanceof Error && err.name === 'ConditionalCheckFailedException') {
+    // The second name is what a plain write gets when a transaction on the
+    // same row is in flight: not a verdict on the write, just "try again".
+    if (
+      err instanceof Error &&
+      (err.name === 'ConditionalCheckFailedException' || err.name === 'TransactionConflictException')
+    ) {
       throw new ConditionFailedError()
     }
     rethrowIfItemTooLarge(err, partition, doc['id'])
@@ -315,13 +419,30 @@ export async function putItem(
   }
 }
 
+/**
+ * Run a plain (non-transactional) delete, waiting out a transaction that is
+ * in flight on the same row instead of failing on it.
+ */
+async function sendPastTransactions<T>(send: () => Promise<T>): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await send()
+    } catch (err) {
+      const conflict = err instanceof Error && err.name === 'TransactionConflictException'
+      if (!conflict || attempt >= 8) throw err
+      await new Promise((resolve) => setTimeout(resolve, Math.random() * 10 * attempt))
+    }
+  }
+}
+
 export type DeleteOptions = {
-  returnOld?: boolean
   /**
-   * The document being deleted, in a collection with unique fields: its
-   * guards are released in the same transaction.
+   * The document being deleted and the collection it belongs to, when that
+   * collection has unique guards or index rows (`hasCompanionRows`): they
+   * are removed in the same transaction.
    */
-  unique?: { collection: string; doc: Record<string, unknown> }
+  companions?: { collection: string; doc: Record<string, unknown> }
+  returnOld?: boolean
 }
 
 /**
@@ -339,39 +460,71 @@ export async function deleteItem(
   const docClient = requireDocClient(adapter)
   const key = keyFor(partition, id)
 
-  const guards = options.unique
-    ? uniqueGuardsFor(adapter, options.unique.collection, partition, options.unique.doc)
+  const { companions } = options
+  let guards = companions
+    ? uniqueGuardsFor(adapter, companions.collection, partition, companions.doc)
+    : []
+  const rows = companions
+    ? indexRowsFor(adapter, companions.collection, partition, companions.doc)
     : []
 
-  if (guards.length > 0) {
+  if (guards.length + rows.length > 0) {
     const mine = ownedBy(String(id))
-    try {
-      await docClient.send(
-        new TransactWriteCommand({
-          TransactItems: [
-            { Delete: { TableName: adapter.tableName, Key: key } },
-            ...guards.map((guard) => ({
-              Delete: { TableName: adapter.tableName, Key: guard.key, ...mine },
-            })),
-          ],
-        }),
-      )
-    } catch (err) {
-      // A guard that belongs to another document (possible for rows that
-      // predate guards) cancels the transaction. The document must still go,
-      // so delete it alone and leave that guard with its owner.
-      if (!cancellationReasons(err)) throw err
-      await docClient.send(new DeleteCommand({ TableName: adapter.tableName, Key: key }))
+
+    for (;;) {
+      // Index rows beyond what one transaction holds stay behind as strays;
+      // lookups re-check every document, so those are harmless.
+      const indexDeletes = rows
+        .slice(0, MAX_TRANSACTION_ITEMS - 1 - guards.length)
+        .map((row) => indexDelete(adapter, row))
+      try {
+        await docClient.send(
+          new TransactWriteCommand({
+            TransactItems: [
+              { Delete: { TableName: adapter.tableName, Key: key } },
+              ...guards.map((guard) => ({
+                Delete: { TableName: adapter.tableName, Key: guard.key, ...mine },
+              })),
+              ...indexDeletes,
+            ],
+          }),
+        )
+        break
+      } catch (err) {
+        const reasons = cancellationReasons(err)
+        if (!reasons) throw err
+
+        // A guard that belongs to another document (possible for rows that
+        // predate guards) cancels the transaction. The document must still
+        // go, so leave that guard with its owner and try again without it.
+        const kept = guards.filter((_, index) => {
+          const code = reasons[1 + index]?.Code
+          return code === undefined || code === 'None'
+        })
+        if (kept.length < guards.length) {
+          guards = kept
+          continue
+        }
+        // Anything else (e.g. a concurrent write to the same rows): delete
+        // the document alone rather than fail. Its companion rows become
+        // strays.
+        await sendPastTransactions(() =>
+          docClient.send(new DeleteCommand({ TableName: adapter.tableName, Key: key })),
+        )
+        break
+      }
     }
-    return options.returnOld ? options.unique!.doc : null
+    return options.returnOld ? companions!.doc : null
   }
 
-  const result = await docClient.send(
-    new DeleteCommand({
-      TableName: adapter.tableName,
-      Key: key,
-      ...(options.returnOld ? { ReturnValues: 'ALL_OLD' as const } : {}),
-    }),
+  const result = await sendPastTransactions(() =>
+    docClient.send(
+      new DeleteCommand({
+        TableName: adapter.tableName,
+        Key: key,
+        ...(options.returnOld ? { ReturnValues: 'ALL_OLD' as const } : {}),
+      }),
+    ),
   )
 
   return options.returnOld && result.Attributes ? stripInternalKeys(result.Attributes) : null
@@ -379,8 +532,9 @@ export async function deleteItem(
 
 /**
  * Delete several rows from one partition, one request each, at most
- * `WRITE_CONCURRENCY` in flight at a time. Pass `uniqueCollection` when the
- * rows belong to a collection whose unique guards must be released with them.
+ * `WRITE_CONCURRENCY` in flight at a time. Pass `collection` when the rows
+ * belong to a collection whose unique guards and index rows must go with
+ * them (`hasCompanionRows`).
  *
  * `BatchWriteItem` could cut the request count (25 deletes per call) but has
  * partial-failure semantics that need retry logic — out of scope until we
@@ -390,15 +544,10 @@ export async function deleteItems(
   adapter: DynamoAdapter,
   partition: string,
   rows: Record<string, unknown>[],
-  uniqueCollection?: string,
+  collection?: string,
 ): Promise<void> {
   await mapWithConcurrency(rows, WRITE_CONCURRENCY, (row) =>
-    deleteItem(
-      adapter,
-      partition,
-      row['id'],
-      uniqueCollection ? { unique: { collection: uniqueCollection, doc: row } } : {},
-    ),
+    deleteItem(adapter, partition, row['id'], collection ? { companions: { collection, doc: row } } : {}),
   )
 }
 

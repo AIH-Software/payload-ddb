@@ -2,9 +2,9 @@ import type { DeleteMany } from 'payload'
 
 import type { DynamoAdapter } from './types.js'
 
+import { hasCompanionRows } from './utilities/fieldIndexes.js'
 import { prepareCollectionWhere } from './utilities/prepareWhere.js'
 import { queryMatching } from './utilities/queryMatching.js'
-import { hasUniqueFields } from './utilities/uniqueGuards.js'
 import { deleteItems } from './utilities/writeItems.js'
 
 /**
@@ -23,7 +23,8 @@ export const deleteMany: DeleteMany = async function deleteMany(
     this,
     partition,
     matched,
-    // Unique guards are released together with the documents that hold them.
-    hasUniqueFields(this, collection) ? collection : undefined,
+    // Unique guards and index rows go together with the documents they
+    // point at.
+    hasCompanionRows(this, collection) ? collection : undefined,
   )
 }
