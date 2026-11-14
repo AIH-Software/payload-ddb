@@ -51,6 +51,10 @@ fields alone are unchanged. Creating a version writes two more small rows in
 the transaction it already used.
 
 Also:
+- Fixed: a document changing a unique value while another write to it was
+  in flight could keep the guard for its old value, which blocked that value
+  for every other document. Only real DynamoDB reports the conflict that
+  triggered it, so DynamoDB Local never showed it. Present since 4.1.0.
 - Rows that tie on every sort key are now ordered by id, so the same query
   always returns the same order.
 - With `pagination: false`, a page read through an index reports

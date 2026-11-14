@@ -1,6 +1,6 @@
 import { GetCommand, PutCommand, QueryCommand } from '@aws-sdk/lib-dynamodb'
 import { ValidationError } from 'payload'
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { backfillUniqueGuards, type DynamoAdapter } from '../../src/index.js'
 import { initPayloadTest, type TestHandle } from '../__helpers/initPayload.js'
@@ -251,6 +251,54 @@ describe('unique fields', () => {
     await adapter.create({ collection: 'accounts', data: { handle: 'ada' } })
 
     expect(reused.handle).toBe('ada')
+  })
+
+  it('frees the old value even when the write that frees it collides with another', async () => {
+    const doc = await adapter.create({ collection: 'accounts', data: { handle: 'before' } })
+
+    // Real DynamoDB cancels overlapping transactions with `TransactionConflict`
+    // on the rows they share; DynamoDB Local doesn't. So stage one: the first
+    // transaction that releases the old guard is cancelled that way — which
+    // says nothing about who owns the guard.
+    const send = adapter.docClient!.send.bind(adapter.docClient!) as (
+      ...args: unknown[]
+    ) => Promise<unknown>
+    const releasesGuard = (item: { Delete?: { Key?: { pk?: string } } }) =>
+      item.Delete?.Key?.pk === 'accounts#unique#handle'
+    let staged = false
+    const spy = vi.spyOn(adapter.docClient!, 'send').mockImplementation(((
+      command: { input?: { TransactItems?: { Delete?: { Key?: { pk?: string } } }[] } },
+      ...rest: unknown[]
+    ) => {
+      const items = command.input?.TransactItems
+      if (!staged && items?.some(releasesGuard)) {
+        staged = true
+        return Promise.reject(
+          Object.assign(new Error('Transaction cancelled'), {
+            name: 'TransactionCanceledException',
+            CancellationReasons: items.map((item) => ({
+              Code: releasesGuard(item) ? 'TransactionConflict' : 'None',
+            })),
+          }),
+        )
+      }
+      return send(command, ...rest)
+    }) as never)
+
+    try {
+      await adapter.updateOne({ collection: 'accounts', data: { handle: 'after' }, id: doc.id })
+    } finally {
+      spy.mockRestore()
+    }
+    expect(staged).toBe(true)
+
+    // The document holds exactly the guard for its current value…
+    const held = (await rawPartition('accounts#unique#handle'))
+      .filter((guard) => guard['owner'] === String(doc.id))
+      .map((guard) => guard['sk'])
+    expect(held).toEqual(['s:after'])
+    // …so the value it gave up is free for someone else.
+    await adapter.create({ collection: 'accounts', data: { handle: 'before' } })
   })
 
   it('applies to upsert and updateMany', async () => {

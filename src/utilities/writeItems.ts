@@ -513,26 +513,27 @@ export async function putItem(
       } catch (err) {
         const reasons = cancellationReasons(err)
         if (!reasons) throw err
-        const failed = (index: number) => {
-          const code = reasons[index]?.Code
-          return code !== undefined && code !== 'None'
-        }
+        // Only a failed *condition* says something about the row it was on.
+        // A `TransactionConflict` means another write to that row was in
+        // flight — no verdict at all — and any other code (too large,
+        // throttled) is an error to pass on, not a lost race.
+        const conditionFailed = (index: number) =>
+          reasons[index]?.Code === 'ConditionalCheckFailed'
 
-        if (failed(0)) throw new ConditionFailedError()
-        const taken = guards.findIndex((_, index) => failed(1 + index))
-        if (taken !== -1) {
-          // A clash with a concurrent transaction on the same guard isn't
-          // proof the value is taken — let the caller retry and find out.
-          if (reasons[1 + taken]?.Code === 'TransactionConflict') throw new ConditionFailedError()
-          throw new UniqueViolationError(guards[taken]!.path)
-        }
-        const kept = released.filter((_, index) => !failed(1 + guards.length + index))
+        if (conditionFailed(0)) throw new ConditionFailedError()
+        const taken = guards.findIndex((_, index) => conditionFailed(1 + index))
+        if (taken !== -1) throw new UniqueViolationError(guards[taken]!.path)
+
+        // A released guard that isn't ours stays with its owner. This must
+        // not be confused with a conflict on it: dropping the release then
+        // would let the document move on and strand its old guard, blocking
+        // that value for every other document.
+        const kept = released.filter((_, index) => !conditionFailed(1 + guards.length + index))
         if (kept.length < released.length) {
           released = kept
           continue
         }
-        // What's left are the index rows, which carry no condition: the only
-        // way they cancel is another write to this same document in flight.
+        // Anything in flight on the same rows: let the caller look again.
         if (reasons.some((reason) => reason?.Code === 'TransactionConflict')) {
           throw new ConditionFailedError()
         }
@@ -797,10 +798,7 @@ export async function putVersionAsLatest(
     const reasons = cancellationReasons(err)
     const lost =
       reasons &&
-      (contested.some((index) => {
-        const code = reasons[index]?.Code
-        return code !== undefined && code !== 'None'
-      }) ||
+      (contested.some((index) => reasons[index]?.Code === 'ConditionalCheckFailed') ||
         reasons.some((reason) => reason?.Code === 'TransactionConflict'))
     if (lost) throw new ConditionFailedError()
     throw err
